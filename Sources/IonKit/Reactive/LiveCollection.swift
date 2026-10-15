@@ -12,7 +12,8 @@ protocol AnyLiveCollection: AnyObject {
 }
 
 /// An observable, ordered list of live instances for one query, plus its pagination links and meta.
-/// Two screens showing the same query share one instance; it dies with its last view.
+/// Two screens showing the same query share one instance; it dies with its last view. It holds the store weakly:
+/// a reload that outlives its store (logout, a test ending) fails with `IonError.cancelled` instead of crashing.
 ///
 /// Usage: `ForEach(collection.items) { live in Row(person: live.value) }`
 @MainActor @Observable
@@ -30,7 +31,7 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     /// The request-cache key of the first page.
     public let key: RequestKey
     @ObservationIgnored let request: Request<JSONAPIDocument>
-    @ObservationIgnored unowned let store: Store
+    @ObservationIgnored private(set) weak var store: Store?
     @ObservationIgnored private(set) var primaryKeys: [ResourceKey] = []
 
     nonisolated public var resourceType: String { T.resourceType }
@@ -49,6 +50,7 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     /// Fetches `links.next` and appends its items. Does nothing without a next link.
     public func loadMore() async throws {
         guard let next = links.next else { return }
+        guard let store else { throw IonError.cancelled }
         var pageRequest = request
         pageRequest.path = next.href
         pageRequest.query = []
@@ -62,6 +64,7 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     // MARK: Internal
 
     func load(reload: Bool) async throws {
+        guard let store else { throw IonError.cancelled }
         var request = self.request
         if reload { request.cache.reload = true }
         if primaryKeys.isEmpty, !state.isLoaded { state = .loading }
@@ -96,6 +99,10 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     }
 
     private func materialize() {
+        guard let store else {
+            items = []
+            return
+        }
         items = primaryKeys.compactMap { key in
             guard let live = store.peek(T.self, key: key), !live.isDeleted else { return nil }
             return live

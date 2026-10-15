@@ -4,8 +4,9 @@
 
 > This file is the canonical source of truth for IonKit's design. It started as a Claude Docs document on
 > 2026-10-15 and was moved into the repository, with the revisions listed under
-> [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed. Change the code and this file
-> in the same pull request.
+> [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed. Consumers of the library start
+> at [Current state of the code](#current-state-of-the-code-v03-2026-10-15). Change the code and this file in the
+> same pull request.
 
 ## Purpose and goals
 
@@ -235,7 +236,7 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 
 The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`.
 
-**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store `unowned` and the store holds collections weakly, so there is no cycle and a collection dies with its last view. v2 adds a size cap with LRU eviction of request entries and of resources no view observes.
+**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. v2 adds a size cap with LRU eviction of request entries and of resources no view observes.
 
 ## Live instances, SwiftUI and concurrency
 
@@ -262,7 +263,7 @@ public final class LiveCollection<T: Resource> {
     public var hasMore: Bool                        // links.next != nil
     public func reload() async throws               // IonError; typed throws once the toolchain allows it
     public func loadMore() async throws             // appends links.next
-    unowned let store: Store
+    weak var store: Store?                          // nil after the store died; loads then throw .cancelled
 }
 `
 
@@ -330,7 +331,7 @@ let saved: Live<Person> = try await store.save(&draft)   // PATCH people/42, bod
 | existing, `hasChanges` | `PATCH {collectionPath}/{id}`, `op: .update`, `records: [key]` | `type`, `id`, only attributes whose encoded JSON differs from `original`, only relationships that changed |
 | existing, no changes | no request; returns the existing `Live<T>` | — |
 
-The diff is computed by encoding `value` and `original` with the codec to `JSONValue` and comparing per key: an attribute whose encoded value differs is sent; an attribute present in `original` and absent in `value` (an optional set to `nil`) is sent as `null`; a relationship is sent when its encoded relationship object differs; a relationship that is `.unloaded` in `value` is never sent, and one that is `.unloaded` in `original` but set in `value` is sent (the user set it; see the decision below and [issue #2](https://github.com/winsmith/ion-kit/issues/2)). `hasChanges` means "this diff is non-empty", so a `Date` that differs only below the encoded precision never produces an empty PATCH. No per-field tracking in the struct, so user types stay plain.
+The diff is computed by encoding `value` and `original` with the codec to `JSONValue` and comparing per key: an attribute whose encoded value differs is sent; an attribute present in `original` and absent in `value` (an optional set to `nil`) is sent as `null`; a relationship is sent when its encoded relationship object differs; a relationship that is `.unloaded` in `value` is never sent, and one that is `.unloaded` in `original` but set in `value` is sent, because the user set it (decided 2026-10-15). `hasChanges` means "this diff is non-empty", so a `Date` that differs only below the encoded precision never produces an empty PATCH. No per-field tracking in the struct, so user types stay plain.
 
 **On success** the response document is upserted (the server's version wins, including server-set fields like `id` and `updatedAt`; a `204` to a PATCH means "accepted as sent", so the draft's value is upserted instead), queries for the type are invalidated as the Cache rules say, the draft passed `inout` gets `original = value` (so `hasChanges` is `false` and a double-tap sends nothing), and `save` returns the `Live<T>`. For a new resource the `Live<T>` is created only when the server confirms; before that nothing of the draft is visible elsewhere in the app. The same draft can keep being edited and saved again.
 
@@ -398,14 +399,13 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence is a v3 feature with a clear seam (`CacheSnapshot`) |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
-| A relationship set on a draft whose `original` had it `.unloaded` is sent (added 2026-10-15 during v0.3, awaiting confirmation in [issue #2](https://github.com/winsmith/ion-kit/issues/2)) | Otherwise an edit to a resource fetched without `include` is dropped silently |
+| A relationship set on a draft whose `original` had it `.unloaded` is sent; one that is `.unloaded` in the draft never is (added during v0.3, confirmed 2026-10-15) | Otherwise an edit to a resource fetched without `include` is dropped silently |
 | Minimum Linux toolchain is Swift 6.1; CI runs `swift:6.1` and `swift:6.2` (added 2026-10-15) | 6.1 is what the implementation was verified on; 6.0 was never run |
 
 **Open questions** — each needs an answer before the milestone named
 
 - **(v1.x)** Will Village need a `POST` query endpoint (search with a request body)? That decides how early `cache.key` for POST must be solid.
-- **(v1.x)** When can the async store API go back to `async throws(IonError)`? Swift 6.1 crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a `T`-dependent type (`Live<T>`, `LiveCollection<T>`) and the caller uses the result; release builds are fine. Tracked in [issue #1](https://github.com/winsmith/ion-kit/issues/1) with a reproducer; needs a toolchain that compiles it (6.2 builds the package but the reproducer is unverified there).
-- **(v1.0)** Confirm or reverse the relationship-diff decision above ([issue #2](https://github.com/winsmith/ion-kit/issues/2)).
+- **(v1.x)** When can the async store API go back to `async throws(IonError)`? Swift 6.1 crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a `T`-dependent type (`Live<T>`, `LiveCollection<T>`) and the caller uses the result; release builds are fine. Swift 6.2 compiles the reproducer (verified in CI on 2026-10-15), so the fix is to require Swift 6.2 / Xcode 26 as the minimum toolchain and drop 6.1 — a platform decision still to be taken. Tracked in [issue #1](https://github.com/winsmith/ion-kit/issues/1).
 - Client-generated ids (no), key casing (camelCase), `links.next` (yes), expiry defaults (1 min / 24 h, configurable), `source.pointer` (optional, as in the spec), token refresh (none, log out), `Cache-Control` (yes) — all answered on 2026-10-15 and folded into the table above.
 
 ## Development milestones
@@ -489,6 +489,339 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
+## Current state of the code (v0.3, 2026-10-15)
+
+This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
+signatures are, and what to rely on. It describes the package as merged on `main` on 2026-10-15; update it in the
+same pull request as any public API change.
+
+**Status.** v0.1 (wire format), v0.2 (reads) and v0.3 (writes) are implemented in `Sources/IonKit` (about 2,600
+lines) with `Sources/IonKitTesting` (about 200 lines) and 60 swift-testing tests that pass on macOS 15 (Xcode 16.3)
+and in the `swift:6.1` and `swift:6.2` containers. Nothing on the v1.x / v2 / v3 lists exists yet. There is no
+sample app and the fixtures are synthetic.
+
+**Depending on it.**
+
+```swift
+// Package.swift
+.package(url: "https://github.com/winsmith/ion-kit.git", branch: "main"),
+…
+.target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
+.testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
+```
+
+Platforms: macOS 15, iOS 18, Linux (Swift 6.1+). Swift 6 language mode with strict concurrency; Foundation only.
+No tags or releases exist yet; depend on `main` or a commit.
+
+**Behaviors to rely on.**
+
+- Every throwing method on `Store` and `LiveCollection` throws `IonError` only (plain `throws` in the signature
+  for now; see the open question). Catch with `catch IonError.cancelled`, `catch let error as IonError`.
+- `Store`, `Live`, `LiveCollection` are `@MainActor`; `Draft`, `Request`, every wire type and the codec are
+  `Sendable` values. Call store methods from the main actor (SwiftUI `.task` already is).
+- One `Live<T>` per `ResourceKey` per store, for as long as the store lives; identity (`===`) is stable, and a
+  deleted resource keeps its instance with `isDeleted == true`.
+- One `LiveCollection<T>` per request key while any view holds it; it dies with its last reference.
+- GET responses are cached by `method + URL with sorted query`; mutations never are. Defaults: fresh for 1
+  minute, stale-while-revalidate until 24 hours, server `Cache-Control` / `Expires` shorten that. Every
+  response, cached or not, upserts its resources.
+- After `save` or `delete`, cached queries of that resource type are expired and alive collections of it reload
+  (`autoRefresh`). `delete` removes the item from collections before the reload.
+- Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
+  the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
+  the property is optional (Swift's `Codable` synthesis ignores default values). Dates are ISO 8601, with or
+  without fractional seconds. Key casing is configured once per store through `ResourceCodec`.
+
+**Public API.** Signatures as they compile today, grouped by source folder; doc comments are in the code.
+
+```swift
+// Resource/
+public protocol Resource: Codable, Sendable, Equatable {
+    static var resourceType: String { get }
+    static var collectionPath: String { get }          // default: resourceType + "s"
+    var id: String { get set }
+}
+extension Resource {
+    var resourceKey: ResourceKey { get }
+    var hasLocalID: Bool { get }                       // id is a "local:" placeholder from Draft(new:)
+    static var localIDPrefix: String { get }           // "local:"
+    static func isLocalID(_ id: String) -> Bool
+    static func makeLocalID() -> String
+}
+
+public struct ResourceKey: Hashable, Sendable, Codable, CustomStringConvertible {
+    var type: String; var id: String
+    init(type: String, id: String)
+    init<T: Resource>(_ resourceType: T.Type, id: String)
+}
+
+public enum ToOne<T: Resource>: Hashable, Sendable, Codable {
+    case unloaded, null, id(String)
+    var id: String? { get set }                        // set nil → .null
+    var isLoaded: Bool { get }
+    var key: ResourceKey? { get }
+    var relationshipObject: RelationshipObject? { get } // nil for .unloaded
+    init(_ object: RelationshipObject?)
+}
+public enum ToMany<T: Resource>: Hashable, Sendable, Codable {
+    case unloaded, ids([String])
+    var ids: [String] { get set }                      // [] when unloaded; set always gives .ids
+    var isLoaded: Bool { get }
+    var keys: [ResourceKey] { get }
+    var relationshipObject: RelationshipObject? { get }
+    init(_ object: RelationshipObject?)
+}
+```
+
+```swift
+// WireFormat/
+public enum JSONValue: Hashable, Sendable, Codable, ExpressibleBy{Nil,Boolean,Integer,Float,String,Array,Dictionary}Literal {
+    case null, bool(Bool), number(Double), string(String), array([JSONValue]), object([String: JSONValue])
+    var stringValue: String?; var doubleValue: Double?; var intValue: Int?; var boolValue: Bool?
+    var arrayValue: [JSONValue]?; var objectValue: [String: JSONValue]?; var isNull: Bool
+    subscript(key: String) -> JSONValue?; subscript(index: Int) -> JSONValue?
+    init(encoding value: some Encodable, encoder: JSONEncoder = JSONEncoder()) throws
+    func decode<T: Decodable>(_ type: T.Type = T.self, decoder: JSONDecoder = JSONDecoder()) throws -> T
+}
+
+public struct Link: Hashable, Sendable, Codable {                 // string or link object on the wire
+    var href: String; var rel, describedby, title, type, hreflang: String?; var meta: [String: JSONValue]?
+    var url: URL? { get }
+}
+public struct Links: Hashable, Sendable, Codable {                // null members are dropped
+    var all: [String: Link]
+    subscript(name: String) -> Link? { get set }
+    var selfLink, related, describedby, first, last, prev, next: Link? { get }
+    var isEmpty: Bool { get }
+}
+
+public struct ResourceIdentifier: Hashable, Sendable, Codable {
+    var type: String; var id: String; var lid: String?; var meta: [String: JSONValue]?
+    init(_ key: ResourceKey); var key: ResourceKey { get }
+}
+public enum RelationshipData: Hashable, Sendable { case one(ResourceIdentifier?), many([ResourceIdentifier]); var identifiers: [ResourceIdentifier] { get } }
+public struct RelationshipObject: Hashable, Sendable, Codable {   // data == nil: member absent
+    var data: RelationshipData?; var links: Links?; var meta: [String: JSONValue]?
+}
+public struct ResourceObject: Hashable, Sendable, Codable {       // id == nil only on an outgoing create body
+    var type: String; var id: String?; var lid: String?
+    var attributes: [String: JSONValue]; var relationships: [String: RelationshipObject]
+    var links: Links?; var meta: [String: JSONValue]?
+    var key: ResourceKey? { get }
+}
+
+public struct ErrorSource: Hashable, Sendable, Codable {
+    var pointer, parameter, header: String?
+    var attribute: String? { get }                                // from "/data/attributes/<name>"
+    var relationship: String? { get }                             // from "/data/relationships/<name>"
+}
+public struct ErrorObject: Hashable, Sendable, Codable {
+    var id, status, code, title, detail: String?; var source: ErrorSource?; var links: Links?; var meta: [String: JSONValue]?
+    var statusCode: Int? { get }
+}
+
+public enum PrimaryData: Hashable, Sendable { case one(ResourceObject?), many([ResourceObject]); var objects: [ResourceObject] { get } }
+public struct JSONAPIDocument: Hashable, Sendable, Codable {
+    var data: PrimaryData?                                        // nil: member absent; .one(nil): "data": null
+    var included: [ResourceObject]; var links: Links?; var meta: [String: JSONValue]?
+    var errors: [ErrorObject]?; var jsonapi: JSONValue?; var extensions: [String: JSONValue]
+    init(one object: ResourceObject?, included: [ResourceObject] = [], links: Links? = nil, meta: [String: JSONValue]? = nil)
+    init(many objects: [ResourceObject], included: [ResourceObject] = [], links: Links? = nil, meta: [String: JSONValue]? = nil)
+    var allObjects: [ResourceObject] { get }; var isEmpty: Bool { get }
+    static let mediaType: String                                  // "application/vnd.api+json"
+    static func decode(_ data: Data) throws -> JSONAPIDocument    // empty body → empty document
+    func encoded() throws -> Data
+}
+
+public struct ResourceCodec: Sendable {
+    var keyDecodingStrategy: JSONDecoder.KeyDecodingStrategy; var keyEncodingStrategy: JSONEncoder.KeyEncodingStrategy
+    init(keyDecodingStrategy: … = .useDefaultKeys, keyEncodingStrategy: … = .useDefaultKeys)
+    static let `default`: ResourceCodec; static let snakeCase: ResourceCodec
+    func decode<T: Resource>(_ object: ResourceObject, as type: T.Type = T.self) throws(IonError) -> T
+    func encode<T: Resource>(_ value: T) throws(IonError) -> ResourceObject   // local id → id nil; .unloaded omitted
+    func diff<T: Resource>(from original: T, to value: T) throws(IonError) -> ResourceObject
+    static func isEmptyChange(_ object: ResourceObject) -> Bool
+    func validateForSave(_ object: ResourceObject) throws(IonError)        // rejects "local:" relationship targets
+    func makeDecoder() -> JSONDecoder; func makeEncoder() -> JSONEncoder
+}
+public enum CodecError: Error, Sendable { case typeMismatch(expected: String, found: String), missingID(type: String), notAnObject, localRelationship(String) }
+public enum ISO8601 { static func parse(_ string: String) -> Date?; static func format(_ date: Date) -> String }
+```
+
+```swift
+// Requests/
+public enum HTTPMethod: String, Sendable { case get, post, patch, delete }
+public enum Operation: Sendable { case find, query, create, update, delete, custom }
+public struct CacheOptions: Sendable, Hashable {
+    var key: String?; var reload: Bool; var backgroundReload: Bool; var types: Set<String>?
+    init(key: String? = nil, reload: Bool = false, backgroundReload: Bool = false, types: Set<String>? = nil)
+    static let `default`, reload, backgroundReload: CacheOptions
+}
+public struct Request<Response: Decodable & Sendable>: Sendable {
+    var method: HTTPMethod; var path: String; var query: [URLQueryItem]; var headers: [String: String]
+    var body: Data?; var op: Operation; var records: [ResourceKey]; var cache: CacheOptions
+    init(method: HTTPMethod, path: String, query: [URLQueryItem] = [], headers: [String: String] = [:],
+         body: Data? = nil, op: Operation = .custom, records: [ResourceKey] = [], cache: CacheOptions = .default)
+    func decoding<Other: Decodable & Sendable>(_ type: Other.Type) -> Request<Other>
+}
+extension Request where Response == JSONAPIDocument {
+    static func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) -> Request
+    static func query<T: Resource>(_ type: T.Type, path: String? = nil, filter: [String: String] = [:], sort: [String] = [],
+                                   page: [String: String] = [:], include: [String] = [], query: [URLQueryItem] = [],
+                                   cache: CacheOptions = .default) -> Request
+}
+public struct RequestKey: Hashable, Sendable { let value: String; init(_ value: String); init(method: HTTPMethod, url: URL) }
+public struct RawRequest: Sendable, Hashable {
+    var method: HTTPMethod; var url: URL; var headers: [String: String]; var body: Data?
+    init<R>(_ request: Request<R>, baseURL: URL) throws(IonError)   // resolves path, sorts query, adds JSON:API headers
+    var key: RequestKey { get }
+}
+public struct RawResponse: Sendable, Hashable {
+    let status: Int; let headers: [String: String]; let data: Data
+    func header(_ name: String) -> String?; var isSuccess: Bool { get }
+}
+public protocol RequestHandler: Sendable {
+    func handle(_ request: RawRequest, next: @Sendable (RawRequest) async throws -> RawResponse) async throws -> RawResponse
+}
+public struct HandlerChain: Sendable { init(_ handlers: [any RequestHandler]); func perform(_ request: RawRequest) async throws -> RawResponse }
+public struct URLSessionHandler: RequestHandler { init(session: URLSession = .shared) }
+public struct BearerTokenHandler: RequestHandler { init(token: @escaping @Sendable () async -> String?) }
+public struct LoggingHandler: RequestHandler {
+    enum Level: Sendable { case summary, bodies }
+    init(level: Level = .summary, sink: (@Sendable (String) -> Void)? = nil)
+}
+```
+
+```swift
+// IonError.swift
+public enum IonError: Error, Sendable, CustomStringConvertible {
+    case transport(URLError)
+    case http(status: Int, errors: [ErrorObject])
+    case notFound(ResourceKey)
+    case decoding(ResourceKey?, any Error)
+    case invalidDraft(String)
+    case cancelled
+    var isNotFound: Bool { get }; var status: Int? { get }; var errorObjects: [ErrorObject] { get }
+    func errors(forAttribute name: String) -> [ErrorObject]
+    func errors(forRelationship name: String) -> [ErrorObject]
+    init(_ error: any Error)                                      // maps URLError / CancellationError / DecodingError
+}
+```
+
+```swift
+// Cache/
+public enum CacheState: Sendable { case fresh, stale, expired }
+public protocol CachePolicy: Sendable { func state(of entry: CachedDocument, now: Date) -> CacheState }
+public struct DefaultCachePolicy: CachePolicy {
+    var soft: TimeInterval; var hard: TimeInterval; var honorsServerHeaders: Bool
+    init(soft: TimeInterval = 60, hard: TimeInterval = 86_400, honorsServerHeaders: Bool = true)
+}
+public struct NoCachePolicy: CachePolicy { init() }              // every entry .expired
+public struct CachedDocument: Sendable {                          // keys, not copies
+    var primary: [ResourceKey]; var included: [ResourceKey]; var isCollection: Bool
+    var links: Links; var meta: [String: JSONValue]?; var op: Operation
+    var receivedAt: Date; var invalidatedAt: Date?; var types: Set<String>?; var serverExpiry: Date?
+}
+```
+
+```swift
+// Store/   (all @MainActor)
+@MainActor @Observable public final class Store {
+    let baseURL: URL; let codec: ResourceCodec; var cachePolicy: any CachePolicy
+    init(baseURL: URL, handlers: [any RequestHandler] = [URLSessionHandler()],
+         codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy())
+
+    // reads
+    func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T>
+    func query<T: Resource>(_ type: T.Type, filter: [String: String] = [:], sort: [String] = [], page: [String: String] = [:],
+                            include: [String] = [], cache: CacheOptions = .default) async throws -> LiveCollection<T>
+    func query<T: Resource>(_ type: T.Type, path: String, query: [URLQueryItem] = [], include: [String] = [],
+                            cache: CacheOptions = .default) async throws -> LiveCollection<T>
+    func query<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> LiveCollection<T>
+    func request(_ request: Request<JSONAPIDocument>) async throws -> JSONAPIDocument   // cache step + upsert
+    func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws -> Response  // no cache
+    func peek<T: Resource>(_ type: T.Type, id: String) -> Live<T>?
+    func peek<T: Resource>(_ type: T.Type, key: ResourceKey) -> Live<T>?
+    func peek<T: Resource>(_ relationship: ToOne<T>) -> Live<T>?
+    func peek<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>]
+    func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws -> Live<T>?
+    func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws -> [Live<T>]
+
+    // writes
+    @discardableResult func save<T: Resource>(_ draft: inout Draft<T>) async throws -> Live<T>
+    func delete<T: Resource>(_ live: Live<T>) async throws
+
+    // cache control
+    func invalidate(type: String)                                 // expire queries of the type, reload alive collections
+    func invalidate(key: ResourceKey)                             // expire documents whose primary data lists the key
+    func clear()                                                  // logout
+    func upsert(_ document: JSONAPIDocument)                      // push payloads, seeds; no request
+    var cachedResourceCount: Int { get }
+}
+```
+
+```swift
+// Reactive/   (Live, LiveCollection are @MainActor @Observable)
+public final class Live<T: Resource>: Identifiable {
+    let key: ResourceKey
+    private(set) var value: T
+    private(set) var raw: ResourceObject                          // links, meta, unmodelled attributes
+    private(set) var isDeleted: Bool
+    private(set) var updatedAt: Date
+    nonisolated var id: String { get }
+}
+public final class LiveCollection<T: Resource> {
+    private(set) var items: [Live<T>]                             // tombstones filtered out
+    private(set) var links: Links
+    private(set) var meta: [String: JSONValue]
+    private(set) var state: LoadState
+    var autoRefresh: Bool                                         // default true
+    let key: RequestKey
+    var hasMore: Bool { get }
+    func reload() async throws                                    // first page again; drops appended pages
+    func loadMore() async throws                                  // appends links.next; no-op without one
+}
+public enum LoadState: Sendable { case idle, loading, loaded, failed(IonError); var isLoading, isLoaded: Bool; var error: IonError? }
+public struct Draft<T: Resource>: Sendable {
+    var value: T
+    private(set) var original: T?                                 // nil for a new resource
+    var isNew: Bool { get }; var hasChanges: Bool { get }
+    @MainActor init(_ live: Live<T>)
+    init(new value: T)                                            // id replaced by a local placeholder
+    mutating func revert()
+    @MainActor func isStale(against live: Live<T>) -> Bool
+}
+```
+
+```swift
+// IonKitTesting
+public final class MockHandler: RequestHandler {
+    static let defaultBaseURL: URL                                // https://mock.ionkit.test/
+    init(baseURL: URL = defaultBaseURL, codec: ResourceCodec = .default, latency: Duration? = nil)
+    var requests: [RawRequest] { get }; func requests(for key: String) -> [RawRequest]; func clearRequests()
+    func respond(to key: String, with response: RawResponse)      // key: "GET people?include=tags" (query order free)
+    func respond(to key: String, document: JSONAPIDocument, status: Int = 200, headers: [String: String] = [:])
+    func respond<T: Resource>(to key: String, with value: T, included: [ResourceObject] = [], links: Links? = nil, meta: …, status: Int = 200, headers: …)
+    func respond<T: Resource>(to key: String, with values: [T], included: [ResourceObject] = [], links: Links? = nil, meta: …, status: Int = 200, headers: …)
+    func respond(to key: String, status: Int, errors: [ErrorObject], headers: … = [:])
+    func respond(to key: String, status: Int, headers: … = [:])   // e.g. 204
+    func respond(to key: String, data: Data, status: Int = 200, headers: … = [:])
+    func key(for request: RawRequest) -> String
+}
+public enum Fixtures {
+    static func object<T: Resource>(_ value: T, codec: ResourceCodec = .default) -> ResourceObject
+    static func objects<T: Resource>(_ values: [T], codec: …) -> [ResourceObject]
+    static func document<T: Resource>(_ value: T, included: [ResourceObject] = [], codec: …) -> JSONAPIDocument
+    static func document<T: Resource>(_ values: [T], included: …, links: Links? = nil, codec: …) -> JSONAPIDocument
+    static func data(named name: String, in bundle: Bundle) throws -> Data
+}
+extension Store { func seed<T: Resource>(_ values: [T]) }
+```
+
+**Not there yet** (so do not code against it): `Fetch<T>` view, `related(\.key)`, ETag / 304, retry handler,
+token refresh, `filter[id]` resolve, POST queries, eviction, persistence, client-generated ids, sparse-fieldset
+merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource `links` / `meta`.
+
 ## Implementation notes (2026-10-15)
 
 What landed in v0.1–v0.3 (pull request #7) beyond or beside the sections above. Each item is also folded into its
@@ -496,10 +829,14 @@ section; this list is the changelog for the document.
 
 - **Typed throws deferred.** Async methods on `Store` and `LiveCollection` are declared `async throws` and throw
   `IonError` only, because Swift 6.1 crashes at `-Onone` on typed throws from generic async functions whose
-  result depends on `T`. Synchronous codec methods keep `throws(IonError)`. See the open question and
+  result depends on `T`. Synchronous codec methods keep `throws(IonError)`. Swift 6.2 fixes the crash (verified
+  2026-10-15); restoring typed throws means requiring 6.2. See the open question and
   [issue #1](https://github.com/winsmith/ion-kit/issues/1).
+- **`LiveCollection` holds its store weakly** (the document said `unowned`): a background reload scheduled by
+  `invalidate(type:)` crashed with `swift_abortRetainUnowned` when the store died first, which CI caught on
+  2026-10-15. Loads on an orphaned collection throw `IonError.cancelled`.
 - **Relationship diff** sends a relationship the draft set even when `original` had it `.unloaded`
-  ([issue #2](https://github.com/winsmith/ion-kit/issues/2)).
+  (confirmed 2026-10-15, [issue #2](https://github.com/winsmith/ion-kit/issues/2)).
 - **Small API additions:** `CacheOptions.reload` / `.backgroundReload`, `NoCachePolicy`,
   `store.upsert(_ document:)`, `store.query(T.self, request:)`, `LiveCollection.hasMore`,
   `IonError.errors(forRelationship:)`, `IonError.status` / `.errorObjects`, `JSONAPIDocument.decode(_:)` /
