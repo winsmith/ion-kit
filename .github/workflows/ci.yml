@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app
+      - run: swift --version
+      - run: swift build --build-tests
+      - run: swift test
+
+  linux:
+    name: Linux (swift:${{ matrix.swift }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        swift: ["6.1", "6.2"]
+    container: swift:${{ matrix.swift }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build --build-tests
+      - run: swift test

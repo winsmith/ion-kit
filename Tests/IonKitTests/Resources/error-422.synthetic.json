@@ -1,0 +1,23 @@
+{
+  "errors": [
+    {
+      "id": "e1",
+      "status": "422",
+      "code": "blank",
+      "title": "Validation failed",
+      "detail": "name must not be blank",
+      "source": { "pointer": "/data/attributes/name" },
+      "meta": { "field": "name" }
+    },
+    {
+      "status": "422",
+      "title": "Validation failed",
+      "detail": "group does not exist",
+      "source": { "pointer": "/data/relationships/group/data" }
+    },
+    {
+      "status": "422",
+      "title": "Something else went wrong"
+    }
+  ]
+}

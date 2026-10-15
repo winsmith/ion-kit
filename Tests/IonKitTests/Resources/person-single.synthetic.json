@@ -1,0 +1,37 @@
+{
+  "jsonapi": { "version": "1.1" },
+  "links": {
+    "self": "https://mock.ionkit.test/people/42"
+  },
+  "data": {
+    "type": "person",
+    "id": "42",
+    "attributes": {
+      "name": "Ann Example",
+      "birthday": "1990-05-04T00:00:00Z",
+      "notes": "Likes tea",
+      "updatedAt": "2026-10-15T10:00:00.123Z",
+      "legacyScore": 7
+    },
+    "relationships": {
+      "tags": {
+        "data": [
+          { "type": "tag", "id": "7" },
+          { "type": "tag", "id": "9" }
+        ],
+        "links": { "related": "https://mock.ionkit.test/people/42/tags" }
+      },
+      "group": { "data": null },
+      "friends": { "data": [] }
+    },
+    "links": {
+      "self": { "href": "https://mock.ionkit.test/people/42", "title": "Ann" }
+    },
+    "meta": { "revision": 3 }
+  },
+  "included": [
+    { "type": "tag", "id": "7", "attributes": { "name": "friend" } },
+    { "type": "tag", "id": "9", "attributes": { "name": "colleague" } }
+  ],
+  "meta": { "source": "synthetic" }
+}
