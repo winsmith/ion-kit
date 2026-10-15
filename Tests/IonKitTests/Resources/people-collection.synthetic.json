@@ -1,0 +1,26 @@
+{
+  "links": {
+    "self": "https://mock.ionkit.test/people?page[size]=2",
+    "next": "https://mock.ionkit.test/people?page[number]=2&page[size]=2",
+    "prev": null
+  },
+  "data": [
+    {
+      "type": "person",
+      "id": "42",
+      "attributes": { "name": "Ann Example", "notes": "" },
+      "relationships": { "tags": { "data": [ { "type": "tag", "id": "7" } ] } }
+    },
+    {
+      "type": "person",
+      "id": "43",
+      "attributes": { "name": "Bob Example", "notes": "", "birthday": null },
+      "relationships": { "tags": { "data": [] }, "group": { "data": { "type": "group", "id": "3" } } }
+    }
+  ],
+  "included": [
+    { "type": "tag", "id": "7", "attributes": { "name": "friend" } },
+    { "type": "group", "id": "3", "attributes": { "name": "Family" } }
+  ],
+  "meta": { "page": { "total": 5 } }
+}
