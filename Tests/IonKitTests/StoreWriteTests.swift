@@ -116,7 +116,7 @@ struct StoreWriteTests {
         do {
             try await store.save(&draft)
             Issue.record("expected 422")
-        } catch let error as IonError {
+        } catch {
             #expect(error.status == 422)
             #expect(error.errors(forAttribute: "name").first?.detail == "name must not be blank")
         }
@@ -136,7 +136,7 @@ struct StoreWriteTests {
             try await store.save(&person)
             Issue.record("expected invalidDraft")
         } catch {
-            guard case IonError.invalidDraft = error else {
+            guard case .invalidDraft = error else {
                 Issue.record("expected invalidDraft, got \(error)")
                 return
             }

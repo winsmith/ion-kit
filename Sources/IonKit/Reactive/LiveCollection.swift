@@ -43,14 +43,14 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     }
 
     /// Refetches the first page from the network and drops pages appended by `loadMore()`.
-    public func reload() async throws {
+    public func reload() async throws(IonError) {
         try await load(reload: true)
     }
 
     /// Fetches `links.next` and appends its items. Does nothing without a next link.
-    public func loadMore() async throws {
+    public func loadMore() async throws(IonError) {
         guard let next = links.next else { return }
-        guard let store else { throw IonError.cancelled }
+        guard let store else { throw .cancelled }
         var pageRequest = request
         pageRequest.path = next.href
         pageRequest.query = []
@@ -63,8 +63,8 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
 
     // MARK: Internal
 
-    func load(reload: Bool) async throws {
-        guard let store else { throw IonError.cancelled }
+    func load(reload: Bool) async throws(IonError) {
+        guard let store else { throw .cancelled }
         var request = self.request
         if reload { request.cache.reload = true }
         if primaryKeys.isEmpty, !state.isLoaded { state = .loading }
@@ -72,7 +72,6 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
             let document = try await store.load(request, as: T.self)
             apply(document)
         } catch {
-            let error = IonError(error)
             if case .cancelled = error, items.isEmpty {
                 state = .idle
             } else if items.isEmpty {

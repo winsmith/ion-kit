@@ -150,16 +150,16 @@ public struct ResourceCodec: Sendable {
     }
 
     /// The key as it appears in the encoded JSON, after the key encoding strategy.
-    private func wireKey(for path: [any CodingKey]) -> String {
+    private func wireKey(for path: [String]) -> String {
         switch keyEncodingStrategy {
         case .useDefaultKeys:
-            return path.last!.stringValue
+            return path.last!
         case .convertToSnakeCase:
-            return Self.snakeCase(path.last!.stringValue)
+            return Self.snakeCase(path.last!)
         case .custom(let convert):
-            return convert(path).stringValue
+            return convert(path.map(AnyCodingKey.init)).stringValue
         @unknown default:
-            return path.last!.stringValue
+            return path.last!
         }
     }
 

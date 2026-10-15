@@ -190,7 +190,7 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 **Pagination** follows JSON:API `links` only. `LiveCollection<T>` exposes `links` and `loadMore()`, which fetches `links.next` and appends its items; `reload()` refetches the first page and drops appended pages (refetching every loaded page is a v1.x refinement). Page size and strategy stay a server concern.
 
-**Errors** are one enum, and store methods are meant to use typed throws (`async throws(IonError)`; see [Implementation notes](#implementation-notes-2026-10-15) for why they say plain `throws` today and still throw only `IonError`): `.transport(URLError)`; `.http(status: Int, errors: [ErrorObject])` for 4xx/5xx with a parsed JSON:API `errors` array when present (`isNotFound` is a helper for 404); `.notFound(ResourceKey)` only when a `find` response carries `"data": null`; `.decoding(ResourceKey?, Error)`; `.invalidDraft(String)`; `.cancelled`, mapped from `CancellationError` and `URLError.cancelled` so a view that disappears mid-fetch never shows an error. An empty body or HTTP 204 decodes to an empty document and upserts nothing. `ErrorObject` keeps every member the spec defines (`id`, `status`, `code`, `title`, `detail`, `source.pointer` / `parameter` / `header`, `meta`, `links`); `IonError.http` offers `errors(forAttribute: "name")` and `errors(forRelationship: "group")`, which match on `source.pointer` when the server sends one (the spec makes it optional) and return an empty array otherwise, so forms degrade to showing `title`/`detail`.
+**Errors** are one enum, and store methods use typed throws (`async throws(IonError)`): `.transport(URLError)`; `.http(status: Int, errors: [ErrorObject])` for 4xx/5xx with a parsed JSON:API `errors` array when present (`isNotFound` is a helper for 404); `.notFound(ResourceKey)` only when a `find` response carries `"data": null`; `.decoding(ResourceKey?, Error)`; `.invalidDraft(String)`; `.cancelled`, mapped from `CancellationError` and `URLError.cancelled` so a view that disappears mid-fetch never shows an error. An empty body or HTTP 204 decodes to an empty document and upserts nothing. `ErrorObject` keeps every member the spec defines (`id`, `status`, `code`, `title`, `detail`, `source.pointer` / `parameter` / `header`, `meta`, `links`); `IonError.http` offers `errors(forAttribute: "name")` and `errors(forRelationship: "group")`, which match on `source.pointer` when the server sends one (the spec makes it optional) and return an empty array otherwise, so forms degrade to showing `title`/`detail`.
 
 **JSON:API coverage.** IonKit targets JSON:API 1.1 as a client; the table says what v1 does with each part of the spec so that an unfamiliar server works without changes to the package.
 
@@ -261,13 +261,13 @@ public final class LiveCollection<T: Resource> {
     public private(set) var state: LoadState        // .idle .loading .loaded .failed(IonError)
     public var autoRefresh = true
     public var hasMore: Bool                        // links.next != nil
-    public func reload() async throws               // IonError; typed throws once the toolchain allows it
-    public func loadMore() async throws             // appends links.next
+    public func reload() async throws(IonError)
+    public func loadMore() async throws(IonError)   // appends links.next
     weak var store: Store?                          // nil after the store died; loads then throw .cancelled
 }
 `
 
-**Threading model.** `Store` (itself `@Observable`, so it can sit in the SwiftUI environment), both caches, `Live` and `LiveCollection` are `@MainActor`. The handler chain, `URLSession`, decoding into `JSONAPIDocument` and decoding of the primary `T` values run in a `nonisolated` async function (on Swift 6.2 mark it `@concurrent`; on 6.0/6.1 a `nonisolated` async function already leaves the main actor); the store hops back once to upsert. Everything crossing the boundary is a `Sendable` value (`Request`, `RawResponse`, `JSONAPIDocument`, `T`). An `actor Store` was considered and rejected for v1: every read from SwiftUI would need an `await`, and Observation works most naturally on the main actor. `.task(id:)` cancels the `find` when a view disappears; the shared in-flight task keeps running for other awaiters and the cancelled caller gets `IonError.cancelled`.
+**Threading model.** `Store` (itself `@Observable`, so it can sit in the SwiftUI environment), both caches, `Live` and `LiveCollection` are `@MainActor`. The handler chain, `URLSession`, decoding into `JSONAPIDocument` and decoding of the primary `T` values run in `nonisolated` static async functions, which leave the main actor (the package does not enable `NonisolatedNonsendingByDefault`; when it does, mark them `@concurrent`); the store hops back once to upsert. Everything crossing the boundary is a `Sendable` value (`Request`, `RawResponse`, `JSONAPIDocument`, `T`). An `actor Store` was considered and rejected for v1: every read from SwiftUI would need an `await`, and Observation works most naturally on the main actor. `.task(id:)` cancels the `find` when a view disappears; the shared in-flight task keeps running for other awaiters and the cancelled caller gets `IonError.cancelled`.
 
 **SwiftUI usage** (v1, no helpers beyond the two classes):
 
@@ -286,8 +286,8 @@ struct PersonView: View {
         }
         .task(id: id) {
             do { person = try await store.find(Person.self, id: id, include: ["tags"]) }
-            catch IonError.cancelled { }         // the view went away; show nothing
-            catch { self.error = error as? IonError }   // always an IonError; `catch .cancelled` once typed throws return
+            catch .cancelled { }                 // the view went away; show nothing
+            catch { self.error = error }         // typed throws: error is an IonError
         }
     }
 }
@@ -367,9 +367,9 @@ IonKit depends on nothing outside the Swift toolchain and Foundation, which is w
 
 | Concern | Choice |
 | --- | --- |
-| Swift | 6.0 language mode, strict concurrency on; `swift-tools-version: 6.0` |
-| Apple platforms | `.macOS(.v15)`, `.iOS(.v18)`; visionOS/tvOS/watchOS added to the manifest when someone needs them (no code change expected) |
-| Linux | Swift 6.1+ with `FoundationNetworking` for `URLSession` (`#if canImport(FoundationNetworking)`), `Observation` from the toolchain; CI runs the test suite in the `swift:6.1` and `swift:6.2` Docker images (6.0 is untested) |
+| Swift | Swift 6.2 toolchain (Xcode 26), Swift 6 language mode, strict concurrency; `swift-tools-version: 6.2` |
+| Apple platforms | `.macOS(.v15)`, `.iOS(.v18)`, built with Xcode 26; visionOS/tvOS/watchOS added to the manifest when someone needs them (no code change expected) |
+| Linux | Swift 6.2+ with `FoundationNetworking` for `URLSession` (`#if canImport(FoundationNetworking)`), `Observation` from the toolchain; CI runs the test suite in the `swift:6.2` Docker image |
 | Networking | `URLSession` only; no background sessions, no `URLSessionWebSocketTask` in v1 |
 | JSON | `JSONDecoder` / `JSONEncoder`; a custom ISO 8601 date strategy that accepts fractional seconds; a `JSONValue` enum for untyped `meta`, `attributes` passthrough, the codec's merge step and the diff |
 | Reactivity | `Observation` (`@Observable`, `withObservationTracking`); no Combine, so it compiles on Linux |
@@ -387,6 +387,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Any JSON:API 1.1 server is the target; Village is the first consumer and fixture source | Nothing app-specific in the package; spec-optional members stay optional in IonKit |
 | Read through immutable `Live<T>`, edit through `Draft<T>` | Mirrors WarpDrive checkout; keeps local state out of the cache; structs stay plain |
 | Minimum macOS 15 / iOS 18, Swift 6 strict concurrency | Observation, typed throws and modern concurrency without compatibility shims |
+| Minimum toolchain is Swift 6.2 (Xcode 26); CI runs macOS with Xcode 26 and `swift:6.2` (decided 2026-10-15) | Typed throws on the async store API crash the 6.1 compiler at `-Onone` ([issue #1](https://github.com/winsmith/ion-kit/issues/1)); 6.2 compiles them |
 | Relationships are ids + `peek`/`resolve` in v1 | Typed resolution is additive later; avoids a relationship graph in v1 |
 | Store and caches are `@MainActor`, not an actor | Observation and SwiftUI read synchronously; network and decoding stay off-main anyway |
 | Flat structs decoded via merge-then-`JSONDecoder`; relationship keys captured during encoding | Keeps `Codable` synthesis; no macros, property wrappers, reflection or type registry |
@@ -400,12 +401,10 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | A relationship set on a draft whose `original` had it `.unloaded` is sent; one that is `.unloaded` in the draft never is (added during v0.3, confirmed 2026-10-15) | Otherwise an edit to a resource fetched without `include` is dropped silently |
-| Minimum Linux toolchain is Swift 6.1; CI runs `swift:6.1` and `swift:6.2` (added 2026-10-15) | 6.1 is what the implementation was verified on; 6.0 was never run |
 
 **Open questions** — each needs an answer before the milestone named
 
 - **(v1.x)** Will Village need a `POST` query endpoint (search with a request body)? That decides how early `cache.key` for POST must be solid.
-- **(v1.x)** When can the async store API go back to `async throws(IonError)`? Swift 6.1 crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a `T`-dependent type (`Live<T>`, `LiveCollection<T>`) and the caller uses the result; release builds are fine. Swift 6.2 compiles the reproducer (verified in CI on 2026-10-15), so the fix is to require Swift 6.2 / Xcode 26 as the minimum toolchain and drop 6.1 — a platform decision still to be taken. Tracked in [issue #1](https://github.com/winsmith/ion-kit/issues/1).
 - Client-generated ids (no), key casing (camelCase), `links.next` (yes), expiry defaults (1 min / 24 h, configurable), `source.pointer` (optional, as in the spec), token refresh (none, log out), `Cache-Control` (yes) — all answered on 2026-10-15 and folded into the table above.
 
 ## Development milestones
@@ -438,6 +437,7 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] `Draft<T>`, `store.save(&draft)` (POST / PATCH with diff), `store.delete`; server-assigned ids with local placeholders; `IonError.invalidDraft`.
 - [x] The invalidation rules table, `LiveCollection.autoRefresh`, immediate local removal on delete; `IonError.http.errors(forAttribute:)`.
 - [ ] Village creates, edits and deletes people, notes and tags through IonKit; README with the examples from this document (README done).
+- [x] Typed throws on the whole async API, after raising the minimum toolchain to Swift 6.2.
 
 **v1.x — Ergonomics** (as Village needs them; tracked in [issue #6](https://github.com/winsmith/ion-kit/issues/6)): `Fetch<T>` SwiftUI view over `LoadState`; `reload()` that refetches every loaded page; `ETag` / `If-None-Match` with 304 handling; retry with backoff for idempotent requests; `resolve` via one `filter[id]` query; POST queries with explicit keys if the open question above says yes.
 
@@ -453,7 +453,7 @@ This section is the contract for anyone picking up a task: where code goes, what
 
 `
 IonKit/
-  Package.swift                 # swift-tools-version 6.0; targets IonKit, IonKitTesting, IonKitTests
+  Package.swift                 # swift-tools-version 6.2; targets IonKit, IonKitTesting, IonKitTests
   Sources/IonKit/
     Resource/      Resource.swift, ResourceKey.swift, Relationship.swift (ToOne, ToMany)
     WireFormat/    JSONAPIDocument.swift, ResourceObject.swift, ErrorObject.swift, JSONValue.swift, ResourceCodec.swift
@@ -480,7 +480,7 @@ IonKit/
 
 **Definition of done for a task**
 
-1. `swift build` and `swift test` pass on macOS and in the `swift:6.1` Linux container (`docker run --rm -v $PWD:/src -w /src swift:6.1 swift test`); CI also runs `swift:6.2`.
+1. `swift build` and `swift test` pass on macOS (Xcode 26) and in the `swift:6.2` Linux container (`docker run --rm -v $PWD:/src -w /src swift:6.2 swift test`).
 2. New behavior has a test against `MockHandler`, not the network.
 3. Public API changes are reflected in this document (`docs/ARCHITECTURE.md`, the relevant section) and in the README example if it changes usage.
 4. The milestone list above is updated: done items ticked, surprises added as open questions.
@@ -496,8 +496,8 @@ signatures are, and what to rely on. It describes the package as merged on `main
 same pull request as any public API change.
 
 **Status.** v0.1 (wire format), v0.2 (reads) and v0.3 (writes) are implemented in `Sources/IonKit` (about 2,600
-lines) with `Sources/IonKitTesting` (about 200 lines) and 60 swift-testing tests that pass on macOS 15 (Xcode 16.3)
-and in the `swift:6.1` and `swift:6.2` containers. Nothing on the v1.x / v2 / v3 lists exists yet. There is no
+lines) with `Sources/IonKitTesting` (about 200 lines) and 61 swift-testing tests that pass on macOS 15 (Xcode 26)
+and in the `swift:6.2` container. Nothing on the v1.x / v2 / v3 lists exists yet. There is no
 sample app and the fixtures are synthetic.
 
 **Depending on it.**
@@ -510,13 +510,13 @@ sample app and the fixtures are synthetic.
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
-Platforms: macOS 15, iOS 18, Linux (Swift 6.1+). Swift 6 language mode with strict concurrency; Foundation only.
+Platforms: macOS 15, iOS 18, Linux. Toolchain: Swift 6.2 (Xcode 26) or newer. Swift 6 language mode with strict concurrency; Foundation only.
 No tags or releases exist yet; depend on `main` or a commit.
 
 **Behaviors to rely on.**
 
-- Every throwing method on `Store` and `LiveCollection` throws `IonError` only (plain `throws` in the signature
-  for now; see the open question). Catch with `catch IonError.cancelled`, `catch let error as IonError`.
+- Every throwing method on `Store` and `LiveCollection` is `throws(IonError)`: `catch .cancelled { }` and a
+  final `catch { error.status }` are exhaustive, and `error` is an `IonError` without a cast.
 - `Store`, `Live`, `LiveCollection` are `@MainActor`; `Draft`, `Request`, every wire type and the codec are
   `Sendable` values. Call store methods from the main actor (SwiftUI `.task` already is).
 - One `Live<T>` per `ResourceKey` per store, for as long as the store lives; identity (`===`) is stable, and a
@@ -732,24 +732,24 @@ public struct CachedDocument: Sendable {                          // keys, not c
          codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy())
 
     // reads
-    func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T>
+    func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws(IonError) -> Live<T>
     func query<T: Resource>(_ type: T.Type, filter: [String: String] = [:], sort: [String] = [], page: [String: String] = [:],
-                            include: [String] = [], cache: CacheOptions = .default) async throws -> LiveCollection<T>
+                            include: [String] = [], cache: CacheOptions = .default) async throws(IonError) -> LiveCollection<T>
     func query<T: Resource>(_ type: T.Type, path: String, query: [URLQueryItem] = [], include: [String] = [],
-                            cache: CacheOptions = .default) async throws -> LiveCollection<T>
-    func query<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> LiveCollection<T>
-    func request(_ request: Request<JSONAPIDocument>) async throws -> JSONAPIDocument   // cache step + upsert
-    func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws -> Response  // no cache
+                            cache: CacheOptions = .default) async throws(IonError) -> LiveCollection<T>
+    func query<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws(IonError) -> LiveCollection<T>
+    func request(_ request: Request<JSONAPIDocument>) async throws(IonError) -> JSONAPIDocument   // cache step + upsert
+    func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws(IonError) -> Response  // no cache
     func peek<T: Resource>(_ type: T.Type, id: String) -> Live<T>?
     func peek<T: Resource>(_ type: T.Type, key: ResourceKey) -> Live<T>?
     func peek<T: Resource>(_ relationship: ToOne<T>) -> Live<T>?
     func peek<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>]
-    func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws -> Live<T>?
-    func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws -> [Live<T>]
+    func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws(IonError) -> Live<T>?
+    func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws(IonError) -> [Live<T>]
 
     // writes
-    @discardableResult func save<T: Resource>(_ draft: inout Draft<T>) async throws -> Live<T>
-    func delete<T: Resource>(_ live: Live<T>) async throws
+    @discardableResult func save<T: Resource>(_ draft: inout Draft<T>) async throws(IonError) -> Live<T>
+    func delete<T: Resource>(_ live: Live<T>) async throws(IonError)
 
     // cache control
     func invalidate(type: String)                                 // expire queries of the type, reload alive collections
@@ -778,8 +778,8 @@ public final class LiveCollection<T: Resource> {
     var autoRefresh: Bool                                         // default true
     let key: RequestKey
     var hasMore: Bool { get }
-    func reload() async throws                                    // first page again; drops appended pages
-    func loadMore() async throws                                  // appends links.next; no-op without one
+    func reload() async throws(IonError)                          // first page again; drops appended pages
+    func loadMore() async throws(IonError)                        // appends links.next; no-op without one
 }
 public enum LoadState: Sendable { case idle, loading, loaded, failed(IonError); var isLoading, isLoaded: Bool; var error: IonError? }
 public struct Draft<T: Resource>: Sendable {
@@ -827,11 +827,12 @@ merging, relationship endpoints beyond `store.request`, the `@Resource` macro, t
 What landed in v0.1–v0.3 (pull request #7) beyond or beside the sections above. Each item is also folded into its
 section; this list is the changelog for the document.
 
-- **Typed throws deferred.** Async methods on `Store` and `LiveCollection` are declared `async throws` and throw
-  `IonError` only, because Swift 6.1 crashes at `-Onone` on typed throws from generic async functions whose
-  result depends on `T`. Synchronous codec methods keep `throws(IonError)`. Swift 6.2 fixes the crash (verified
-  2026-10-15); restoring typed throws means requiring 6.2. See the open question and
-  [issue #1](https://github.com/winsmith/ion-kit/issues/1).
+- **Typed throws and the Swift 6.2 minimum.** v0.1–v0.3 first shipped with plain `throws` on the async store
+  API because Swift 6.1 crashes at `-Onone` on typed throws from generic async functions whose result depends on
+  `T`. Swift 6.2 compiles them (verified on CI), so the minimum toolchain was raised to 6.2 / Xcode 26 and
+  `throws(IonError)` restored everywhere on 2026-10-15 ([issue #1](https://github.com/winsmith/ion-kit/issues/1)).
+  `@concurrent` on the off-main functions turned out to erase their typed throws at the call site on 6.2, so they
+  stay plain `nonisolated`.
 - **`LiveCollection` holds its store weakly** (the document said `unowned`): a background reload scheduled by
   `invalidate(type:)` crashed with `swift_abortRetainUnowned` when the store died first, which CI caught on
   2026-10-15. Loads on an orphaned collection throw `IonError.cancelled`.
@@ -849,8 +850,8 @@ section; this list is the changelog for the document.
   that key and retries, rethrowing the original error when the key turns out not to be a relationship. A plain
   attribute with a default value (`var notes: String = ""`) still needs the key on the wire: Swift's synthesis
   does not use defaults for missing keys.
-- **Toolchain.** Verified on Swift 6.1.3 (Linux container), Swift 6.2 (Linux container) and Xcode 16.3 on
-  macOS 15 through CI. Swift 6.0 was never run.
+- **Toolchain.** Verified on Swift 6.2 (Linux container) and Xcode 26 on macOS 15 through CI; the initial
+  v0.1–v0.3 work was also verified on Swift 6.1.3 and Xcode 16.3 before the minimum moved. Swift 6.0 was never run.
 - **Fixtures** are hand-written (`*.synthetic.json`) until captured from Village
   ([issue #3](https://github.com/winsmith/ion-kit/issues/3)). The Village sample app does not exist yet
   ([issue #5](https://github.com/winsmith/ion-kit/issues/5)).

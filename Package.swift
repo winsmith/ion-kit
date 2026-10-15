@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
@@ -12,20 +12,12 @@ let package = Package(
         .library(name: "IonKitTesting", targets: ["IonKitTesting"]),
     ],
     targets: [
-        .target(
-            name: "IonKit",
-            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
-        ),
-        .target(
-            name: "IonKitTesting",
-            dependencies: ["IonKit"],
-            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
-        ),
+        .target(name: "IonKit"),
+        .target(name: "IonKitTesting", dependencies: ["IonKit"]),
         .testTarget(
             name: "IonKitTests",
             dependencies: ["IonKit", "IonKitTesting"],
-            resources: [.copy("Resources")],
-            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
+            resources: [.copy("Resources")]
         ),
     ]
 )

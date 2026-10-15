@@ -12,21 +12,21 @@ extension Store {
     }
 
     /// The live instance of a to-one relationship, fetching it when it is not cached.
-    public func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws -> Live<T>? {
+    public func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws(IonError) -> Live<T>? {
         guard let key = relationship.key else { return nil }
         if !cache.reload, let live = peek(T.self, key: key) { return live }
-        return try await findLive(T.self, id: key.id, cache: cache)
+        return try await find(T.self, id: key.id, cache: cache)
     }
 
     /// The live instances of a to-many relationship, fetching each id that is not cached (one find per gap).
-    public func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws -> [Live<T>] {
+    public func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws(IonError) -> [Live<T>] {
         var result: [Live<T>] = []
         for key in relationship.keys {
             if !cache.reload, let live = peek(T.self, key: key) {
                 result.append(live)
                 continue
             }
-            result.append(try await findLive(T.self, id: key.id, cache: cache))
+            result.append(try await find(T.self, id: key.id, cache: cache))
         }
         return result
     }

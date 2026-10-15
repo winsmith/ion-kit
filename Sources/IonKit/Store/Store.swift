@@ -6,10 +6,6 @@ import Observation
 /// Views call the store; the store runs requests through the handler chain off the main actor; responses are
 /// upserted into the resource cache; the cache updates the `Live` instances views observe.
 ///
-/// Every throwing method of the store and its collections throws `IonError` only, so
-/// `catch IonError.cancelled { }` is exhaustive in practice. The signatures say plain `throws` because Swift 6.1
-/// crashes at -Onone on typed throws from generic async functions whose result depends on `T` (see CLAUDE.md).
-///
 /// Usage: `let store = Store(baseURL: url, handlers: [BearerTokenHandler { token }, URLSessionHandler()])`
 @MainActor @Observable
 public final class Store {
@@ -81,8 +77,8 @@ public final class Store {
 
     // MARK: Fetch pipeline
 
-    /// A GET's cache step followed, when needed, by a fetch. Returns the keys of the result. Throws `IonError` only.
-    func load<T: Resource>(_ request: Request<JSONAPIDocument>, as type: T.Type) async throws -> CachedDocument {
+    /// A GET's cache step followed, when needed, by a fetch. Returns the keys of the result.
+    func load<T: Resource>(_ request: Request<JSONAPIDocument>, as type: T.Type) async throws(IonError) -> CachedDocument {
         let raw = try RawRequest(request, baseURL: baseURL)
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
         if request.method == .get, !request.cache.reload, let entry = requests[key] {
@@ -103,7 +99,7 @@ public final class Store {
     }
 
     /// `load` without typed primaries.
-    func load(_ request: Request<JSONAPIDocument>) async throws -> CachedDocument {
+    func load(_ request: Request<JSONAPIDocument>) async throws(IonError) -> CachedDocument {
         try await load(request, as: NoResource.self)
     }
 
@@ -114,7 +110,7 @@ public final class Store {
 
     /// Runs the request (deduplicated with other in-flight GETs of the same key), decodes the primary objects as
     /// `T` off the main actor, then upserts everything and records the document.
-    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw: RawRequest, key: RequestKey, as type: T.Type) async throws -> CachedDocument {
+    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw: RawRequest, key: RequestKey, as type: T.Type) async throws(IonError) -> CachedDocument {
         let startSequence = mutationCounter
         let fetched: Fetched
         if request.method == .get {
@@ -134,13 +130,9 @@ public final class Store {
             } catch {
                 throw IonError(error)
             }
-            if Task.isCancelled { throw IonError.cancelled }
+            if Task.isCancelled { throw .cancelled }
         } else {
-            do {
-                fetched = try await Store.perform(raw, chain: chain)
-            } catch {
-                throw IonError(error)
-            }
+            fetched = try await Store.perform(raw, chain: chain)
         }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
         return ingest(fetched, typed: typed, request: request, key: key, startSequence: startSequence)
@@ -176,7 +168,7 @@ public final class Store {
     }
 
     /// Runs the handler chain and decodes the wire document. Nonisolated, so it leaves the main actor.
-    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain) async throws -> Fetched {
+    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain) async throws(IonError) -> Fetched {
         let response: RawResponse
         do {
             response = try await chain.perform(raw)
@@ -195,10 +187,8 @@ public final class Store {
         }
     }
 
-    /// Decodes the primary objects as `T`, failing the request when one does not decode.
-    ///
-    /// Plain `throws` on purpose (see `ResourceCache.live`); the caller converts to `IonError`.
-    nonisolated static func decodePrimaries<T: Resource>(of document: JSONAPIDocument, as type: T.Type, codec: ResourceCodec) async throws -> [ResourceKey: T] {
+    /// Decodes the primary objects as `T` off the main actor, failing the request when one does not decode.
+    nonisolated static func decodePrimaries<T: Resource>(of document: JSONAPIDocument, as type: T.Type, codec: ResourceCodec) async throws(IonError) -> [ResourceKey: T] {
         guard T.self != NoResource.self else { return [:] }
         var typed: [ResourceKey: T] = [:]
         for object in document.data?.objects ?? [] {
@@ -217,22 +207,11 @@ public final class Store {
     }
 
     /// The live instance for a key; throws `notFound` when it is not cached and `decoding` when it does not decode.
-    /// Plain `throws` on purpose (see `ResourceCache.live`); always an `IonError`.
-    func liveResource<T: Resource>(for key: ResourceKey, as type: T.Type) throws -> Live<T> {
+    func liveResource<T: Resource>(for key: ResourceKey, as type: T.Type) throws(IonError) -> Live<T> {
         guard let live = try resources.live(for: key, as: T.self, codec: codec) else {
-            throw IonError.notFound(key)
+            throw .notFound(key)
         }
         return live
-    }
-
-    /// `find` with plain `throws`, for generic callers inside the package (see `ResourceCache.live`).
-    func findLive<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T> {
-        let request = Request<JSONAPIDocument>.find(T.self, id: id, include: include, cache: cache)
-        let document = try await load(request, as: T.self)
-        guard let key = document.primary.first else {
-            throw IonError.notFound(ResourceKey(T.self, id: id))
-        }
-        return try liveResource(for: key, as: T.self)
     }
 
     // MARK: Collections
