@@ -58,14 +58,11 @@ final class ResourceCache {
     }
 
     /// The live instance for a key, decoding the raw entry on first typed access. Nil when the key is unknown.
-    ///
-    /// Plain `throws` on purpose: Swift 6.1 crashes at -Onone when a generic typed-throws function returning a
-    /// `T`-dependent type is called from another generic async function. The store's public API converts the error.
-    func live<T: Resource>(for key: ResourceKey, as type: T.Type, codec: ResourceCodec) throws -> Live<T>? {
+    func live<T: Resource>(for key: ResourceKey, as type: T.Type, codec: ResourceCodec) throws(IonError) -> Live<T>? {
         guard var entry = entries[key] else { return nil }
         if let existing = entry.live {
             guard let live = existing as? Live<T> else {
-                throw IonError.decoding(key, CodecError.typeMismatch(expected: T.resourceType, found: "\(Swift.type(of: existing))"))
+                throw .decoding(key, CodecError.typeMismatch(expected: T.resourceType, found: "\(Swift.type(of: existing))"))
             }
             return live
         }

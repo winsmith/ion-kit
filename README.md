@@ -9,7 +9,7 @@ with one live-updating instance per resource and an explicit draft/save cycle fo
 - Edit through a `Draft<T>` copy, save with a PATCH that carries only changed fields, create with POST, delete
   with DELETE; live instances and open collections update from the response.
 - Cache in RAM with stale-while-revalidate defaults that honor the server's `Cache-Control` / `Expires`.
-- Swift 6, Foundation only, no third-party dependencies. Compiles on macOS 15, iOS 18 and Linux.
+- Swift 6.2, Foundation only, no third-party dependencies. Compiles on macOS 15, iOS 18 and Linux.
 
 IonKit borrows [WarpDrive](https://warp-drive.io)'s layering (request chain → cache → live resources), not its
 JavaScript mechanics. The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the canonical source of
@@ -78,8 +78,8 @@ struct PersonView: View {
         }
         .task(id: id) {
             do { person = try await store.find(Person.self, id: id, include: ["tags"]) }
-            catch IonError.cancelled { }                      // the view went away; show nothing
-            catch { self.error = error as? IonError }
+            catch .cancelled { }                              // the view went away; show nothing
+            catch { self.error = error }                      // typed throws: error is an IonError
         }
     }
 }
@@ -122,8 +122,8 @@ field-level messages via `errors(forAttribute: "name")` when the server sends `s
 
 ## Errors
 
-Every store method throws `IonError` only: `.transport`, `.http(status:errors:)`, `.notFound`, `.decoding`,
-`.invalidDraft` and `.cancelled`.
+Every store method uses typed throws, `async throws(IonError)`: `.transport`, `.http(status:errors:)`,
+`.notFound`, `.decoding`, `.invalidDraft` and `.cancelled`. A `catch .cancelled { }` needs no cast.
 
 ## Testing
 
@@ -140,10 +140,12 @@ let person = try await store.find(Person.self, id: "42")
 
 ## Building
 
+Requires Swift 6.2 (Xcode 26 on macOS).
+
 ```sh
 swift build
 swift test
-docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
+docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux
 ```
 
 ## Status

@@ -12,7 +12,7 @@ request as the code.
 swift build
 swift test
 swift build -c release
-docker run --rm -v $PWD:/src -w /src swift:6.1 swift test   # Linux, what CI runs
+docker run --rm -v $PWD:/src -w /src swift:6.2 swift test   # Linux, what CI runs
 ```
 
 Tests use swift-testing and `IonKitTesting.MockHandler`; nothing touches the network.
@@ -44,23 +44,16 @@ Tests/IonKitTests/       one file per source folder; fixtures under Resources/ (
 - No new dependencies without a line in the design document's decisions table.
 - Prefer deleting over abstracting: a feature not in the current milestone is a separate PR, not a hook.
 
-## Known toolchain issue: typed throws
+## Toolchain
 
-The design calls for `async throws(IonError)` on store methods. Swift 6.1 (the toolchain in `swift:6.1` and
-Xcode 16.3/16.4) crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a type
-that depends on `T` (`Live<T>`, `LiveCollection<T>`, `[ResourceKey: T]`) and the caller uses the result. Release
-builds are unaffected. The package itself builds and tests green on `swift:6.2` in CI, but whether 6.2 fixes the
-typed-throws crash is not verified yet (issue #1). Until the minimum toolchain is one that compiles it, async
-store and collection
-methods use plain `throws` and are documented to throw `IonError` only; synchronous codec methods keep typed
-throws. `catch IonError.cancelled` works everywhere. Once the toolchain allows it, restore `throws(IonError)` on
-`find`, `query`, `resolve`, `save`, `delete`, `request`, `reload`, `loadMore` and the internal `load`/`fetch`
-path. A minimal reproducer: a generic `func b<T: P>(_: T.Type) async throws(E) -> C<T>` called with
-`let c = try await s.b(X.self); _ = c.v` crashes `swiftc -Onone` 6.1.3.
+Swift 6.2 (Xcode 26 on macOS, the `swift:6.2` image on Linux) is the minimum. Older toolchains crash in IRGen at
+`-Onone` on the typed throws the store API uses (`async throws(IonError)` on generic functions returning
+`Live<T>` / `LiveCollection<T>`); see issue #1 for the reproducer. Do not work around that by dropping typed
+throws again.
 
 ## Definition of done
 
-- `swift build` and `swift test` pass on macOS and in the `swift:6.1` container.
+- `swift build` and `swift test` pass on macOS (Xcode 26) and in the `swift:6.2` container.
 - New behavior has a test against `MockHandler`, not the network.
 - Public API changes are reflected in `docs/ARCHITECTURE.md` and, if usage changes, in the README.
 - The milestone list in `docs/ARCHITECTURE.md` is updated: done items ticked, surprises added as open questions
