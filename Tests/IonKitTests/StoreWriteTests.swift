@@ -154,10 +154,12 @@ struct StoreWriteTests {
         #expect(ann.isDeleted)
         #expect(collection.items.map(\.id) == ["2"], "removed at once")
         #expect(store.peek(Person.self, id: "1") === ann, "the tombstoned instance survives")
-        for _ in 0..<50 where mock.requests(for: "GET people").count < 2 {
+        // The background reload must have landed, or the explicit reload below joins its in-flight request.
+        for _ in 0..<50 where mock.requests(for: "GET people").count < 2 || !store.inflight.isEmpty {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(mock.requests(for: "GET people").count == 2, "collection reloaded")
+        #expect(store.inflight.isEmpty)
 
         mock.respond(to: "GET people", with: [Person(id: "1", name: "Ann"), Person(id: "2", name: "Bob")])
         try await collection.reload()

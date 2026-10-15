@@ -12,7 +12,8 @@ with one live-updating instance per resource and an explicit draft/save cycle fo
 - Swift 6, Foundation only, no third-party dependencies. Compiles on macOS 15, iOS 18 and Linux.
 
 IonKit borrows [WarpDrive](https://warp-drive.io)'s layering (request chain → cache → live resources), not its
-JavaScript mechanics. The full design lives in the architecture document linked from `CLAUDE.md`.
+JavaScript mechanics. The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the canonical source of
+truth for the package.
 
 ## Defining resources
 
@@ -148,7 +149,7 @@ docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
 ## Status
 
 v0.1 (wire format), v0.2 (reads) and v0.3 (writes) are implemented and tested against `MockHandler`. See the
-milestone list in the architecture document for what comes next.
+milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
 

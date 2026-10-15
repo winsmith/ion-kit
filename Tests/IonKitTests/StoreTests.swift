@@ -235,6 +235,19 @@ struct StoreReadTests {
         #expect(collection.items.count == 1, "but the entry is expired, so the next query refetches")
     }
 
+    @Test func collectionSurvivesItsStore() async throws {
+        var store: Store? = Store(baseURL: MockHandler.defaultBaseURL, handlers: [mock])
+        mock.respond(to: "GET people", with: [Person(id: "1", name: "Ann")])
+        let collection = try await store!.query(Person.self)
+        store!.invalidate(type: "person")   // schedules a background reload that will outlive the store
+        store = nil
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(collection.store == nil)
+        #expect(collection.items.map(\.id) == ["1"], "keeps what it last showed")
+        await #expect(throws: IonError.self) { try await collection.reload() }
+        #expect(collection.items.map(\.id) == ["1"])
+    }
+
     @Test func resolveFetchesOnlyMissingIDs() async throws {
         store.seed([Tag(id: "7", name: "friend")])
         mock.respond(to: "GET tags/9", with: Tag(id: "9", name: "colleague"))

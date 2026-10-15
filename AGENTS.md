@@ -1,9 +1,10 @@
 # IonKit — guide for agents and contributors
 
 A Swift package for talking to JSON:API 1.1 servers from SwiftUI: live-updating resource instances, drafts for
-edits, an in-memory cache. The design document is the contract for every change:
-https://claude.ai/artifact/RLz9GDSBMCbgVqRGQ8UJY3 ("IonKit Architecture Design"). Read the section for the
-milestone you are working on, the Conventions block and the Definition of done before writing code.
+edits, an in-memory cache. The design document [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the canonical
+source of truth and the contract for every change. Read the section for the milestone you are working on, the
+Conventions block and the Definition of done before writing code, and update the document in the same pull
+request as the code.
 
 ## Commands
 
@@ -61,5 +62,6 @@ path. A minimal reproducer: a generic `func b<T: P>(_: T.Type) async throws(E) -
 
 - `swift build` and `swift test` pass on macOS and in the `swift:6.1` container.
 - New behavior has a test against `MockHandler`, not the network.
-- Public API changes are reflected in the design document and, if usage changes, in the README.
-- The design document's milestone list is updated: done items ticked, surprises added as open questions.
+- Public API changes are reflected in `docs/ARCHITECTURE.md` and, if usage changes, in the README.
+- The milestone list in `docs/ARCHITECTURE.md` is updated: done items ticked, surprises added as open questions
+  and to its "Implementation notes" section.
