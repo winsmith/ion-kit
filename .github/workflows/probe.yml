@@ -1,0 +1,20 @@
+name: typed-throws probe
+on:
+  push:
+    branches: [experiment/typed-throws-probe]
+jobs:
+  probe:
+    name: swift:${{ matrix.swift }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        swift: ["6.1", "6.2"]
+    container: swift:${{ matrix.swift }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - name: Compile reproducer at -Onone
+        run: swiftc -parse-as-library -emit-library -module-name M -o /tmp/out.so -Onone -swift-version 6 .probe/lib.swift .probe/app.swift
+      - name: Build package in debug
+        run: swift build --build-tests
