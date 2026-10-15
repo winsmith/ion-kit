@@ -48,8 +48,9 @@ Tests/IonKitTests/       one file per source folder; fixtures under Resources/ (
 The design calls for `async throws(IonError)` on store methods. Swift 6.1 (the toolchain in `swift:6.1` and
 Xcode 16.3/16.4) crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a type
 that depends on `T` (`Live<T>`, `LiveCollection<T>`, `[ResourceKey: T]`) and the caller uses the result. Release
-builds are unaffected. Whether Swift 6.2 fixes it is not verified yet (the CI job for `swift:6.2` is
-non-blocking until it is). Until the minimum toolchain is one that compiles it, async store and collection
+builds are unaffected. The package itself builds and tests green on `swift:6.2` in CI, but whether 6.2 fixes the
+typed-throws crash is not verified yet (issue #1). Until the minimum toolchain is one that compiles it, async
+store and collection
 methods use plain `throws` and are documented to throw `IonError` only; synchronous codec methods keep typed
 throws. `catch IonError.cancelled` works everywhere. Once the toolchain allows it, restore `throws(IonError)` on
 `find`, `query`, `resolve`, `save`, `delete`, `request`, `reload`, `loadMore` and the internal `load`/`fetch`

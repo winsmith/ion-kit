@@ -23,8 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         swift: ["6.1", "6.2"]
-    # 6.2 is not verified yet (see CLAUDE.md); keep it informational until it is.
-    continue-on-error: ${{ matrix.swift == '6.2' }}
     container: swift:${{ matrix.swift }}
     steps:
       - uses: actions/checkout@v4
