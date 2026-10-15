@@ -37,3 +37,12 @@ public enum Fixtures {
         return try Data(contentsOf: url)
     }
 }
+
+extension Store {
+    /// Upserts resource values into the cache without a request, so that `peek` and cached-only paths have data.
+    ///
+    /// Usage: `store.seed([Person(id: "1", name: "Ann")])`
+    public func seed<T: Resource>(_ values: [T]) {
+        upsert(JSONAPIDocument(many: values.map { try! codec.encode($0) }))
+    }
+}

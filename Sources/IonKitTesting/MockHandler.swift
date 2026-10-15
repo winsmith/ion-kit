@@ -4,9 +4,8 @@ import Synchronization
 
 /// A terminal handler for tests: serves queued responses by `"METHOD path?query"` key and records every request.
 ///
-/// Keys match method, path and sorted query exactly, relative to `baseURL`. Each key holds a FIFO queue; the last
-/// response in a queue is served again once the queue is otherwise empty. An unmatched key throws
-/// `IonError.transport`.
+/// Keys match method, path and sorted query exactly, relative to `baseURL`. Each key holds a FIFO queue; once a
+/// queue is drained its last served response is repeated. An unmatched key throws `IonError.transport`.
 ///
 /// Usage:
 /// ```swift
@@ -20,17 +19,21 @@ public final class MockHandler: RequestHandler {
 
     public let baseURL: URL
     public let codec: ResourceCodec
+    /// Delay before each response, to test in-flight deduplication and cancellation. Default: none.
+    public let latency: Duration?
 
     private struct State {
         var queues: [String: [RawResponse]] = [:]
+        var lastServed: [String: RawResponse] = [:]
         var requests: [RawRequest] = []
     }
 
     private let state = Mutex(State())
 
-    public init(baseURL: URL = MockHandler.defaultBaseURL, codec: ResourceCodec = .default) {
+    public init(baseURL: URL = MockHandler.defaultBaseURL, codec: ResourceCodec = .default, latency: Duration? = nil) {
         self.baseURL = baseURL
         self.codec = codec
+        self.latency = latency
     }
 
     /// Every request that reached the handler, in order.
@@ -106,19 +109,22 @@ public final class MockHandler: RequestHandler {
         let key = key(for: request)
         let response: RawResponse? = state.withLock { state in
             state.requests.append(request)
-            guard var queue = state.queues[key], !queue.isEmpty else { return nil }
-            let response = queue.removeFirst()
-            if queue.isEmpty {
-                queue = [response]
+            if var queue = state.queues[key], !queue.isEmpty {
+                let response = queue.removeFirst()
+                state.queues[key] = queue
+                state.lastServed[key] = response
+                return response
             }
-            state.queues[key] = queue
-            return response
+            return state.lastServed[key]
         }
         guard let response else {
             throw IonError.transport(URLError(.unsupportedURL, userInfo: [
                 NSLocalizedDescriptionKey: "MockHandler has no response for \"\(key)\"",
                 NSURLErrorFailingURLErrorKey: request.url,
             ]))
+        }
+        if let latency {
+            try await Task.sleep(for: latency)
         }
         try Task.checkCancellation()
         return response
