@@ -16,11 +16,13 @@ public struct CachedDocument: Sendable {
     public var types: Set<String>?
     /// When the server says the response expires (`Cache-Control: max-age` or `Expires`).
     public var serverExpiry: Date?
+    /// The response's `ETag`; sent back as `If-None-Match` when the document is refetched.
+    public var etag: String?
 
     public init(
         primary: [ResourceKey], included: [ResourceKey] = [], isCollection: Bool, links: Links = Links(),
         meta: [String: JSONValue]? = nil, op: Operation = .custom, receivedAt: Date = Date(), invalidatedAt: Date? = nil,
-        types: Set<String>? = nil, serverExpiry: Date? = nil
+        types: Set<String>? = nil, serverExpiry: Date? = nil, etag: String? = nil
     ) {
         self.primary = primary
         self.included = included
@@ -32,6 +34,19 @@ public struct CachedDocument: Sendable {
         self.invalidatedAt = invalidatedAt
         self.types = types
         self.serverExpiry = serverExpiry
+        self.etag = etag
+    }
+
+    /// The entry after a 304: validated at `sentAt` (when the conditional request left, so an invalidation that
+    /// happened during the round trip still counts), with the 304's caching headers or, when it carries none, the
+    /// previous lifetime shifted forward.
+    func revalidated(at sentAt: Date, response: RawResponse) -> CachedDocument {
+        var entry = self
+        let lifetime = serverExpiry.map { $0.timeIntervalSince(receivedAt) }
+        entry.receivedAt = sentAt
+        entry.etag = response.header("ETag") ?? etag
+        entry.serverExpiry = CacheHeaders.expiry(of: response, receivedAt: sentAt) ?? lifetime.map { sentAt.addingTimeInterval($0) }
+        return entry
     }
 }
 

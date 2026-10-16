@@ -51,6 +51,7 @@ with or without fractional seconds. Servers that send `snake_case` keys get `Res
 let store = Store(
     baseURL: URL(string: "https://api.example.com/v1")!,
     handlers: [
+        RetryHandler(),                      // GETs again after transient failures, with backoff
         BearerTokenHandler { await session.token },
         LoggingHandler(),
         URLSessionHandler(),                 // the last handler performs the request
@@ -62,6 +63,25 @@ One store per API and session. It is `@MainActor` and `@Observable`, so it can s
 The handler chain, `URLSession` and decoding run off the main actor.
 
 ## Reading
+
+```swift
+struct PersonView: View {
+    let id: String
+
+    var body: some View {
+        Fetch(Person.self, id: id, include: ["tags"]) { person in
+            if person.isDeleted { ContentUnavailableView("Deleted", systemImage: "trash") }
+            else { PersonDetail(person: person) }
+        }
+    }
+}
+```
+
+`Fetch` takes the `Store` from the environment (`.environment(store)`) or a `store:` argument, shows a
+`ProgressView` while loading and a `ContentUnavailableView` with a "Try Again" button on failure (pass `loading:`
+and `failed: { error, retry in … }` for your own), and loads again when the id or the store changes. Collections
+work the same way: `Fetch(Person.self, sort: ["name"]) { people in List(people.items) { … } }`. Written by hand, the
+same screen looks like this:
 
 ```swift
 struct PersonView: View {
@@ -92,15 +112,17 @@ another screen, or a `reload()` all flow into the same instance.
 let people = try await store.query(Person.self, filter: ["name": "Ann"], sort: ["-updatedAt"], include: ["tags"])
 ForEach(people.items) { live in Row(person: live.value) }   // people.state, people.links, people.meta
 try await people.loadMore()                                  // follows links.next
-try await people.reload()
+try await people.reload()                                    // every loaded page again, swapped in at once; people.isReloading
 
 let tags = store.peek(person.value.tags)                      // cached instances, no request
 let allTags = try await store.resolve(person.value.tags)      // peek, then find the gaps
+store.resolveStrategy = .batched()                            // …or one GET tags?filter[id]=7,9 per 50 gaps, if the server filters
 ```
 
 Every GET goes through the cache first. `DefaultCachePolicy` serves documents younger than one minute as fresh,
 serves older ones while refetching in the background, and refetches anything older than a day or past the
-server's `max-age` / `Expires`. Per request: `cache: .reload`, `cache: .backgroundReload`.
+server's `max-age` / `Expires`; a document with an `ETag` is refetched with `If-None-Match`, and a 304 just makes it
+fresh again. Per request: `cache: .reload`, `cache: .backgroundReload`.
 
 ## Editing
 
@@ -123,7 +145,8 @@ field-level messages via `errors(forAttribute: "name")` when the server sends `s
 ## Errors
 
 Every store method throws `IonError` only: `.transport`, `.http(status:errors:)`, `.notFound`, `.decoding`,
-`.invalidDraft` and `.cancelled`.
+`.invalidDraft` and `.cancelled`. `error.localizedDescription` is phrased for people ("You appear to be offline."),
+`error.description` for logs.
 
 ## Testing
 
@@ -136,6 +159,7 @@ mock.respond(to: "GET people/42", with: Person(id: "42", name: "Ann"))
 let store = Store(baseURL: MockHandler.defaultBaseURL, handlers: [mock])
 let person = try await store.find(Person.self, id: "42")
 #expect(mock.requests.count == 1)
+mock.respond(to: "GET people/42", throwing: URLError(.timedOut))   // a transport failure, for RetryHandler tests
 ```
 
 ## Building
@@ -148,8 +172,9 @@ docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
 
 ## Status
 
-v0.1 (wire format), v0.2 (reads) and v0.3 (writes) are implemented and tested against `MockHandler`. See the
-milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
+v0.1 (wire format), v0.2 (reads), v0.3 (writes) and v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
+`RetryHandler`, batched `resolve`) are implemented and tested against `MockHandler`. See the milestone list in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
 

@@ -4,9 +4,10 @@
 
 > This file is the canonical source of truth for IonKit's design. It started as a Claude Docs document on
 > 2026-10-15 and was moved into the repository, with the revisions listed under
-> [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed. Consumers of the library start
-> at [Current state of the code](#current-state-of-the-code-v03-2026-10-15). Change the code and this file in the
-> same pull request.
+> [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
+> on 2026-10-16. Consumers of the library start at
+> [Current state of the code](#current-state-of-the-code-v11-2026-10-16). Change the code and this file in the same
+> pull request.
 
 ## Purpose and goals
 
@@ -53,7 +54,7 @@ IonKit borrows WarpDrive's layering (request chain → cache → live resources)
 | `Type` brand (`[Type]: 'user'`) | TypeScript-only inference of resource type string | Not needed — Swift generics carry the type |
 | `Future` (Promise + `abort()`, `getStream()`) | Cancellable request | `Task` + `async throws(IonError)`; cancellation via Swift structured concurrency |
 | Notifications (`remote` / `local` channels) | Field-level signals | `Observation` framework; the cache assigns `live.value` only when it changed |
-| `@warp-drive/ember` `<Request>` / `@warp-drive/react` | Framework bindings with loading/error/content states | SwiftUI: `LoadState` enum (v1) + a `Fetch<T>` view helper (v1.x) |
+| `@warp-drive/ember` `<Request>` / `@warp-drive/react` | Framework bindings with loading/error/content states | SwiftUI: `LoadState` on collections (v1) + the `Fetch` view with loading / content / failed-with-retry (v1.1) |
 
 Three WarpDrive behaviors are worth copying exactly: (1) every response is written to the cache even when the request itself is not cacheable, which is how POST/PATCH/DELETE update live instances; (2) in-flight requests with the same key are deduplicated; (3) a successful create invalidates cached queries tagged with that resource type.
 
@@ -169,7 +170,7 @@ public protocol RequestHandler: Sendable {
 public struct RawResponse: Sendable { public let status: Int; public let headers: [String: String]; public let data: Data }
 `
 
-`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`; each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`. A `401` surfaces as `IonError.http(status: 401, …)` and the app logs the user out; there is no token-refresh hook in v1 (a refresh handler is v1.x only if a consumer needs it).
+`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`; each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`; v1.1 adds `RetryHandler`, which retries idempotent requests (GET by default) after transient transport failures (timeouts, lost or refused connections, DNS and TLS failures; not "offline", which should fail at once) and after 408 / 429 / 500 / 502 / 503 / 504, with exponential backoff and jitter capped at `maxDelay`, honoring `Retry-After` and giving up when it asks for longer than `maxDelay`. It goes first in the chain so every attempt runs through the handlers after it. A `401` surfaces as `IonError.http(status: 401, …)` and the app logs the user out; there is no token-refresh hook (no consumer needs one; decided 2026-10-16).
 
 **Store builders (v1)**
 
@@ -188,7 +189,7 @@ public struct RawResponse: Sendable { public let status: Int; public let headers
 
 Query parameters are sorted before the `RequestKey` is derived so that `filter[a]&filter[b]` and `filter[b]&filter[a]` share a cache entry (the WarpDrive `sortQueryParams` rule).
 
-**Pagination** follows JSON:API `links` only. `LiveCollection<T>` exposes `links` and `loadMore()`, which fetches `links.next` and appends its items; `reload()` refetches the first page and drops appended pages (refetching every loaded page is a v1.x refinement). Page size and strategy stay a server concern.
+**Pagination** follows JSON:API `links` only. `LiveCollection<T>` exposes `links` and `loadMore()`, which fetches `links.next` and appends its items. `reload()` refetches the first page and then follows the fresh `links.next` for as many pages as were loaded, and swaps the whole result in once (since v1.1; before, appended pages were dropped). A background reload after a mutation refetches the first page only and keeps the appended pages, so a save never costs one request per loaded page. Page size and strategy stay a server concern.
 
 **Errors** are one enum, and store methods are meant to use typed throws (`async throws(IonError)`; see [Implementation notes](#implementation-notes-2026-10-15) for why they say plain `throws` today and still throw only `IonError`): `.transport(URLError)`; `.http(status: Int, errors: [ErrorObject])` for 4xx/5xx with a parsed JSON:API `errors` array when present (`isNotFound` is a helper for 404); `.notFound(ResourceKey)` only when a `find` response carries `"data": null`; `.decoding(ResourceKey?, Error)`; `.invalidDraft(String)`; `.cancelled`, mapped from `CancellationError` and `URLError.cancelled` so a view that disappears mid-fetch never shows an error. An empty body or HTTP 204 decodes to an empty document and upserts nothing. `ErrorObject` keeps every member the spec defines (`id`, `status`, `code`, `title`, `detail`, `source.pointer` / `parameter` / `header`, `meta`, `links`); `IonError.http` offers `errors(forAttribute: "name")` and `errors(forRelationship: "group")`, which match on `source.pointer` when the server sends one (the spec makes it optional) and return an empty array otherwise, so forms degrade to showing `title`/`detail`.
 
@@ -201,10 +202,10 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 | Links as a string or as `{ "href", "rel", "describedby", "title", "type", "hreflang", "meta" }` | both forms parse into `Links` | — |
 | Relationship objects: `data`, `links`, `meta`; `data: null` / `[]` | `data` mapped to `ToOne`/`ToMany`; `links`/`meta` on `raw` | relationship endpoints (`/x/1/relationships/y`) through `store.request` only |
 | `include`, `fields[type]`, `filter`, `sort`, `page[*]` | passed through as given; a `fields` response decodes only if the struct's omitted properties are optional | field-level merge for sparse fieldsets (v2) |
-| Pagination `links.first` / `prev` / `next` / `last` | `loadMore()`, `reload()`; absent links mean a single page | refetch of every loaded page (v1.x) |
+| Pagination `links.first` / `prev` / `next` / `last` | `loadMore()`, `reload()` refetching every loaded page (v1.1); absent links mean a single page | — |
 | Client-generated ids and `lid` (1.1) | not sent; ids are server-assigned | opt-in client ids if a server requires them |
 | Error objects with every spec member | parsed; field mapping when `source.pointer` is present | — |
-| `Cache-Control`, `Expires`, `Date` | honored by `DefaultCachePolicy` | `ETag` / `If-None-Match` and 304 (v1.x) |
+| `Cache-Control`, `Expires`, `Date`, `ETag` | honored by `DefaultCachePolicy`; a cached document's `ETag` goes back as `If-None-Match` and a 304 revalidates it (v1.1) | `If-Match` on writes, if a server ever needs it |
 | Key casing (camelCase, snake_case, dasherized) | camelCase by default; `keyDecodingStrategy` / `keyEncodingStrategy` on the store | — |
 | Atomic operations extension, profiles | not supported | if a consumer needs them |
 
@@ -214,7 +215,9 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 
 **Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `any AnyLiveResource`), `isDeleted` and a `mutationSequence`. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` is the only thing that drops entries in v1.
 
-**Request cache** — `[RequestKey: CachedDocument]` where `CachedDocument` holds `primary: [ResourceKey]`, `included: [ResourceKey]`, `links`, `meta`, `receivedAt`, `invalidatedAt`, and an optional `types: Set<String>`. It stores keys, not copies, so a cached collection always materializes from the current live instances. `RequestKey` = method + resolved URL with sorted query, or `cache.key` when set (required to cache a POST query).
+**Request cache** — `[RequestKey: CachedDocument]` where `CachedDocument` holds `primary: [ResourceKey]`, `included: [ResourceKey]`, `links`, `meta`, `receivedAt`, `invalidatedAt`, an optional `types: Set<String>`, `serverExpiry` and the response's `etag`. It stores keys, not copies, so a cached collection always materializes from the current live instances. `RequestKey` = method + resolved URL with sorted query, or `cache.key` when set (required to cache a POST query). A response to a request that was sent before a newer document for the same key landed does not replace that document.
+
+**Conditional requests (v1.1).** When a GET's key has a cached document with an `etag`, the store adds `If-None-Match` to the raw request (unless the request sets that header itself) before it enters the handler chain. A 304 to a GET comes back through the chain as an empty document and is handled before anything is upserted: the cached entry keeps its resource keys and gets `receivedAt` set to the instant the conditional request was *sent* (so an invalidation during the round trip still counts), its `etag` from the 304 or the old one, and its `serverExpiry` from the 304's `Cache-Control` / `Expires` or, when the 304 carries none, the previous lifetime shifted forward. Nothing is upserted and no collection changes, since nothing changed. A 304 for a key with no cached document (cleared mid-flight, or a server answering 304 unprompted) is fetched again without the conditional header; a second 304 is `IonError.http(status: 304)`. Resources carry no ETag of their own and writes send no `If-Match`.
 
 **Policy.** `CachePolicy` is a protocol with one method, `state(of entry: CachedDocument, now: Date) -> CacheState`, returning `.fresh`, `.stale` or `.expired`. `DefaultCachePolicy(soft: 1 min, hard: 24 h)` is configurable per store and overridable per request; it returns `.expired` whenever `invalidatedAt > receivedAt`, the server's `Cache-Control: max-age` / `Expires` (relative to the response `Date`) has passed, or `receivedAt` is older than `hard`; `.stale` when older than `soft`; otherwise `.fresh`. `Cache-Control: no-store` keeps a document out of the request cache entirely (resources are still upserted); `Cache-Control: no-cache` expires it at once. `NoCachePolicy` (every entry `.expired`) exists for tests. `CacheOptions.reload` and `CacheOptions.backgroundReload` are shorthands for the two flags. The cache step consults only the policy result, in this order on a GET:
 
@@ -223,7 +226,7 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 3. `.stale` or `cache.backgroundReload == true` → return cached, fetch in the background, upsert when done.
 4. `.fresh` → return cached.
 
-**In-flight deduplication and ordering.** `[RequestKey: Task<JSONAPIDocument, any Error>]`, keyed on the wire document so one map serves every `T`; a second caller awaits the existing task and decodes its own type; the entry is removed in a `defer`, so a failed fetch never pins a dead task. Mutations are never deduplicated. Each resource entry carries a `mutationSequence`, incremented when a `save` or `delete` for that key succeeds; a response from a request that started before the key's current sequence does not overwrite that entry (it still updates the request cache), which stops a slow background refetch from reverting a newer PATCH.
+**In-flight deduplication and ordering.** `[RequestKey: InFlight]` (the task plus when it started and the mutation counter at that moment), keyed on the wire document so one map serves every `T`; a second caller awaits the existing task and decodes its own type; the entry is removed in a `defer`, so a failed fetch never pins a dead task. A caller joins an in-flight GET only when that request started after the key's last invalidation and no mutation succeeded since (v1.1); otherwise it starts its own (later callers join the newer one), so a load after a save never adopts a response the server produced before the save. Mutations are never deduplicated. Each resource entry carries a `mutationSequence`, incremented when a `save` or `delete` for that key succeeds; a response from a request that started before the key's current sequence does not overwrite that entry (it still updates the request cache), which stops a slow background refetch from reverting a newer PATCH.
 
 **Invalidation.** After a successful mutation the store applies the rules below. `store.invalidate(type:)` and `store.invalidate(key:)` expose the same for app code (after a push notification, say); `store.clear()` drops everything, for logout.
 
@@ -234,7 +237,7 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 | `.delete` | tombstone, bump `mutationSequence` | same | drop the item at once, then `reload()` if `autoRefresh` |
 | custom `request` | upsert any resources in the response | nothing unless `cache.types` is set on the request | nothing |
 
-The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`.
+The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`. `clear()` resets every alive collection to `.idle` with no items and cancels a reload it may be running, so a logout mid-reload cannot bring old data back.
 
 **Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. v2 adds a size cap with LRU eviction of request entries and of resources no view observes.
 
@@ -293,7 +296,23 @@ struct PersonView: View {
 }
 `
 
-The `Live<Person>` keeps updating after the task finishes: a later `query` that includes this person, a `save` from another screen, or a `reload()` all flow into the same instance. v1.x adds a `Fetch<T>` view that wraps the `task`/state boilerplate (`Fetch(Person.self, id: id) { live in … } loading: { … } failed: { … }`), equivalent to WarpDrive's `<Request>` component.
+The `Live<Person>` keeps updating after the task finishes: a later `query` that includes this person, a `save` from another screen, or a `reload()` all flow into the same instance.
+
+**`Fetch` (v1.1)** wraps that boilerplate, like WarpDrive's `<Request>` component. It is one view type for a single resource or a collection; the content closure's parameter tells them apart:
+
+```swift
+Fetch(Person.self, id: id, include: ["tags"]) { person in PersonDetail(person: person) }
+
+Fetch(Person.self, sort: ["name"]) { people in
+    List(people.items) { Row(person: $0.value) }
+} loading: {
+    ProgressView()
+} failed: { error, retry in
+    ContentUnavailableView { Text(error.localizedDescription) } actions: { Button("Try Again") { retry() } }
+}
+```
+
+It takes the `Store` from the environment (`.environment(store)`) or an explicit `store:` argument (previews, apps that keep the store inside another object). The loading view is `ProgressView()` and the failure view `FetchFailureView` (a `ContentUnavailableView` with `error.localizedDescription` and a "Try Again" button) unless the closures are given; `retry` loads again past the cache. The request *and* the store identity form the task id: a changed id, options or store loads again, and a value the cache can serve is shown synchronously, so switching between cached items never flashes the loading view. `IonError.cancelled` is swallowed; `isDeleted` stays the content view's business. `IonError` is a `LocalizedError` since v1.1, with `localizedDescription` phrased for people and `description` for logs. The view lives behind `#if canImport(SwiftUI)` inside the `IonKit` target, which links SwiftUI into every Apple consumer (a macOS CLI included); Linux builds do not see it.
 
 **Lists** bind `LiveCollection` directly: `ForEach(collection.items) { live in Row(person: live.value) }`. Swipe-to-delete calls `store.delete(live)`; the row leaves `items` immediately (tombstone) and the collection reloads in the background to pick up anything else that changed.
 
@@ -355,7 +374,7 @@ let allTags = try await store.resolve(person.value.tags)      // peek, then find
 `
 
 - `peek(_:)` is synchronous and never hits the network; it returns only the instances present in the cache, decoding a raw included entry on first access.
-- `resolve(_:)` fills gaps with one `find` per missing id in v1 (one query via `filter[id]` is a v1.x optimisation that depends on the server supporting it).
+- `resolve(_:)` fills gaps with one `find` per missing id by default. With `store.resolveStrategy = .batched()` (or `strategy:` per call; v1.1) the missing ids go out as one `GET tags?filter[id]=7,9` per batch of 50, sorted so the request key is stable, and any id the query did not return is still fetched one by one; a server that ignores the filter (it answers with resources that were not asked for) makes the call fall back to one by one. The Village server has no filters yet, so the default stays one by one.
 - Setting a relationship on a draft is assignment: `draft.value.tags.ids = ["7", "9"]`; `save` sends it as `relationships.tags.data`. Relationship `links` and the separate relationship endpoints are not used.
 - There is no inverse maintenance: adding a tag to a person does not update the tag's `people` relationship locally; the next response that includes the tag does.
 
@@ -401,12 +420,20 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | No third-party dependencies | Linux build and long-term maintenance |
 | A relationship set on a draft whose `original` had it `.unloaded` is sent; one that is `.unloaded` in the draft never is (added during v0.3, confirmed 2026-10-15) | Otherwise an edit to a resource fetched without `include` is dropped silently |
 | Minimum Linux toolchain is Swift 6.1; CI runs `swift:6.1` and `swift:6.2` (added 2026-10-15) | 6.1 is what the implementation was verified on; 6.0 was never run |
+| ETags live on documents, not resources: `If-None-Match` on GETs, no `If-Match` on writes (2026-10-16) | The request cache is where revalidation pays off; Village sends no ETag at all and decided against version checks |
+| A 304 validates a document as of the moment the request was sent, and no caller joins an in-flight GET from before the last invalidation or mutation (2026-10-16) | Otherwise a reload after a save could mark pre-save data fresh |
+| `reload()` refetches every loaded page and swaps the result in once; mutation-driven background reloads refetch page 1 only; concurrent reloads coalesce (2026-10-16) | No reshuffling list under a refresh spinner, and a save does not cost one request per loaded page per alive list |
+| `RetryHandler` retries GET only by default, transient transport errors only, never past `Retry-After > maxDelay` (2026-10-16) | A retried DELETE answers 404; "offline" should fail at once; a long `Retry-After` under a spinner is worse than the error |
+| `Fetch` is one view for resources and collections, takes the store from the environment or `store:`, passes `retry` to the failure closure, no phase-closure variant (2026-10-16) | A phase closure would be ambiguous with the content-only form under trailing-closure syntax; a failure view without retry is useless in practice |
+| `Fetch` ships inside the `IonKit` target behind `#if canImport(SwiftUI)` rather than as a separate product (2026-10-16) | One import for apps; the cost is SwiftUI linked into macOS command-line consumers, accepted |
+| `resolve` batching is opt-in (`ResolveStrategy.oneByOne` default) and falls back when the server ignores the filter (2026-10-16) | `filter[id]` is a JSON:API recommendation, not a requirement; Village has no filters before its M10 |
+| POST queries with explicit cache keys and a token-refresh handler are not built (2026-10-16) | Village searches with `filter[search]` on GET and signs out on 401; the open questions are answered "no" |
 
 **Open questions** — each needs an answer before the milestone named
 
-- **(v1.x)** Will Village need a `POST` query endpoint (search with a request body)? That decides how early `cache.key` for POST must be solid.
-- **(v1.x)** When can the async store API go back to `async throws(IonError)`? Swift 6.1 crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a `T`-dependent type (`Live<T>`, `LiveCollection<T>`) and the caller uses the result; release builds are fine. Swift 6.2 compiles the reproducer (verified in CI on 2026-10-15), so the fix is to require Swift 6.2 / Xcode 26 as the minimum toolchain and drop 6.1 — a platform decision still to be taken. Tracked in [issue #1](https://github.com/winsmith/ion-kit/issues/1).
+- **(v2)** When can the async store API go back to `async throws(IonError)`? Swift 6.1 crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a `T`-dependent type (`Live<T>`, `LiveCollection<T>`) and the caller uses the result; release builds are fine. Swift 6.2 compiles the reproducer (verified in CI on 2026-10-15), so the fix is to require Swift 6.2 / Xcode 26 as the minimum toolchain and drop 6.1 — a platform decision still to be taken. Tracked in [issue #1](https://github.com/winsmith/ion-kit/issues/1).
 - Client-generated ids (no), key casing (camelCase), `links.next` (yes), expiry defaults (1 min / 24 h, configurable), `source.pointer` (optional, as in the spec), token refresh (none, log out), `Cache-Control` (yes) — all answered on 2026-10-15 and folded into the table above.
+- POST query endpoint (no: Village's search is `filter[search]` on GET, arriving with its browser client; a POST query still caches under `cache.key` but is never *served* from the cache, which is enough until someone needs it) and a token-refresh handler (no: Village signs out on 401) — answered 2026-10-16.
 
 ## Development milestones
 
@@ -414,7 +441,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.x Ergonomics"] --> v2["v2 Depth"] --> v3["v3 Persistence"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v2["v2 Depth"] --> v3["v3 Persistence"]
     style v03 stroke-width:3px
 ```
 
@@ -439,7 +466,17 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] The invalidation rules table, `LiveCollection.autoRefresh`, immediate local removal on delete; `IonError.http.errors(forAttribute:)`.
 - [ ] Village creates, edits and deletes people, notes and tags through IonKit; README with the examples from this document (README done).
 
-**v1.x — Ergonomics** (as Village needs them; tracked in [issue #6](https://github.com/winsmith/ion-kit/issues/6)): `Fetch<T>` SwiftUI view over `LoadState`; `reload()` that refetches every loaded page; `ETag` / `If-None-Match` with 304 handling; retry with backoff for idempotent requests; `resolve` via one `filter[id]` query; POST queries with explicit keys if the open question above says yes.
+**v1.1 — Ergonomics** (the v1.x list, [issue #6](https://github.com/winsmith/ion-kit/issues/6)) — package side done 2026-10-16
+
+- [x] `Fetch` SwiftUI view for one resource or a collection: loading / content / failed-with-retry, store from the environment or `store:`, synchronous cache hits; `IonError: LocalizedError`; `store.find(_:request:)`; `Request: Hashable`.
+- [x] `LiveCollection.reload()` refetches every loaded page and swaps once; background reloads refetch page 1 only; coalesced reloads; `isReloading`; `clear()` resets collections and cancels their reloads.
+- [x] `ETag` / `If-None-Match` with 304 handling in the cache step; no load joins a pre-mutation in-flight GET; a slower older response never replaces a newer document.
+- [x] `RetryHandler` with backoff, jitter and `Retry-After`, GET only by default; `MockHandler.respond(to:throwing:)`.
+- [x] `resolve` via one `filter[id]` query per batch (`ResolveStrategy.batched`, opt-in).
+- [x] POST queries with explicit keys and a token-refresh handler: not needed (open questions answered "no").
+- [ ] Village adopts `Fetch` on its person and list screens and `RetryHandler` in its chain (the gate for calling v1.1 done).
+
+Separate PRs, not part of this milestone: batch mutations that reload alive collections once ([issue #11](https://github.com/winsmith/ion-kit/issues/11)); cache persistence ([issue #10](https://github.com/winsmith/ion-kit/issues/10), v3); typed throws ([issue #1](https://github.com/winsmith/ion-kit/issues/1), needs the Swift 6.2 decision).
 
 **v2 — Depth**: `related(\.key)` observable relationship resolution; LRU eviction with a size cap; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
@@ -457,10 +494,11 @@ IonKit/
   Sources/IonKit/
     Resource/      Resource.swift, ResourceKey.swift, Relationship.swift (ToOne, ToMany)
     WireFormat/    JSONAPIDocument.swift, ResourceObject.swift, ErrorObject.swift, JSONValue.swift, ResourceCodec.swift
-    Requests/      Request.swift, RequestHandler.swift, URLSessionHandler.swift, BearerTokenHandler.swift, LoggingHandler.swift
+    Requests/      Request.swift, RequestHandler.swift, URLSessionHandler.swift, BearerTokenHandler.swift, LoggingHandler.swift, RetryHandler.swift
     Cache/         ResourceCache.swift, RequestCache.swift, CachePolicy.swift
     Store/         Store.swift, Store+Find.swift, Store+Query.swift, Store+Save.swift, Store+Relationships.swift
     Reactive/      Live.swift, LiveCollection.swift, Draft.swift, LoadState.swift
+    SwiftUI/       Fetch.swift (behind `#if canImport(SwiftUI)`; absent on Linux)
     IonError.swift
   Sources/IonKitTesting/        MockHandler.swift, Fixtures.swift
   Tests/IonKitTests/            one file per source folder, fixtures under Resources/
@@ -489,16 +527,17 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v0.3, 2026-10-15)
+## Current state of the code (v1.1, 2026-10-16)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as merged on `main` on 2026-10-15; update it in the
-same pull request as any public API change.
+signatures are, and what to rely on. It describes the package as of the v1.1 pull request on 2026-10-16; update it
+in the same pull request as any public API change.
 
-**Status.** v0.1 (wire format), v0.2 (reads) and v0.3 (writes) are implemented in `Sources/IonKit` (about 2,600
-lines) with `Sources/IonKitTesting` (about 200 lines) and 60 swift-testing tests that pass on macOS 15 (Xcode 16.3)
-and in the `swift:6.1` and `swift:6.2` containers. Nothing on the v1.x / v2 / v3 lists exists yet. There is no
-sample app and the fixtures are synthetic.
+**Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes) and v1.1 (ergonomics: `Fetch`, multi-page reload,
+ETag / 304, `RetryHandler`, batched `resolve`) are implemented in `Sources/IonKit` (about 3,300 lines) with
+`Sources/IonKitTesting` (about 220 lines) and about 80 swift-testing tests that pass on macOS 15 (Xcode 16.3) and in
+the `swift:6.1` and `swift:6.2` containers. Nothing on the v2 / v3 lists exists yet. There is no sample app and the
+fixtures are synthetic.
 
 **Depending on it.**
 
@@ -526,7 +565,18 @@ No tags or releases exist yet; depend on `main` or a commit.
   minute, stale-while-revalidate until 24 hours, server `Cache-Control` / `Expires` shorten that. Every
   response, cached or not, upserts its resources.
 - After `save` or `delete`, cached queries of that resource type are expired and alive collections of it reload
-  (`autoRefresh`). `delete` removes the item from collections before the reload.
+  their first page (`autoRefresh`), keeping pages appended by `loadMore()`. `delete` removes the item from
+  collections before the reload. `reload()` refetches every loaded page and replaces `items` once all arrived;
+  concurrent reloads are coalesced; `isReloading` is true meanwhile.
+- A cached GET document's `ETag` goes back as `If-None-Match`; a 304 keeps the document and makes it fresh again
+  as of the moment the request was sent. Nothing changes on screen for a 304. No load adopts an in-flight
+  response to a request that started before the last mutation or invalidation.
+- `RetryHandler` (opt-in, first in the chain) retries GETs after transient transport failures and 408 / 429 / 5xx
+  with backoff; it never retries when offline, never retries POST / PATCH / DELETE unless told to, and returns a
+  response whose `Retry-After` exceeds `maxDelay` as is.
+- `Fetch` (SwiftUI only) renders loading / content / failure for a `find` or `query`, needs a `Store` in the
+  environment or as `store:`, shows cached values synchronously and loads again when its request or store changes.
+- `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
   the property is optional (Swift's `Codable` synthesis ignores default values). Dates are ISO 8601, with or
@@ -690,6 +740,15 @@ public struct LoggingHandler: RequestHandler {
     enum Level: Sendable { case summary, bodies }
     init(level: Level = .summary, sink: (@Sendable (String) -> Void)? = nil)
 }
+public struct RetryHandler: RequestHandler {                       // v1.1; put it first in the chain
+    let maxAttempts: Int; let baseDelay, maxDelay: Duration; let methods: Set<HTTPMethod>; let statuses: Set<Int>
+    let transportErrors: Set<URLError.Code>; let sleep: @Sendable (Duration) async throws -> Void
+    static let defaultTransportErrors: Set<URLError.Code>        // timedOut, networkConnectionLost, cannotConnectToHost, …
+    init(maxAttempts: Int = 3, baseDelay: Duration = .milliseconds(300), maxDelay: Duration = .seconds(5),
+         methods: Set<HTTPMethod> = [.get], statuses: Set<Int> = [408, 429, 500, 502, 503, 504],
+         transportErrors: Set<URLError.Code> = defaultTransportErrors, sleep: … = Task.sleep)
+}
+extension Request: Hashable {}                                    // v1.1; query order matters here, not in RequestKey
 ```
 
 ```swift
@@ -706,6 +765,7 @@ public enum IonError: Error, Sendable, CustomStringConvertible {
     func errors(forRelationship name: String) -> [ErrorObject]
     init(_ error: any Error)                                      // maps URLError / CancellationError / DecodingError
 }
+extension IonError: LocalizedError { var errorDescription: String? }   // v1.1; for people, unlike `description`
 ```
 
 ```swift
@@ -720,19 +780,26 @@ public struct NoCachePolicy: CachePolicy { init() }              // every entry 
 public struct CachedDocument: Sendable {                          // keys, not copies
     var primary: [ResourceKey]; var included: [ResourceKey]; var isCollection: Bool
     var links: Links; var meta: [String: JSONValue]?; var op: Operation
-    var receivedAt: Date; var invalidatedAt: Date?; var types: Set<String>?; var serverExpiry: Date?
+    var receivedAt: Date; var invalidatedAt: Date?; var types: Set<String>?; var serverExpiry: Date?; var etag: String?
 }
 ```
 
 ```swift
 // Store/   (all @MainActor)
+public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
+    case oneByOne                                                 // default: GET {collectionPath}/{id} per missing id
+    case batched(filter: String = "id", batchSize: Int = 50)      // GET {collectionPath}?filter[id]=7,9 per batch, gaps one by one
+}
+
 @MainActor @Observable public final class Store {
     let baseURL: URL; let codec: ResourceCodec; var cachePolicy: any CachePolicy
+    var resolveStrategy: ResolveStrategy                          // v1.1; default .oneByOne
     init(baseURL: URL, handlers: [any RequestHandler] = [URLSessionHandler()],
          codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy())
 
     // reads
     func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T>
+    func find<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> Live<T>   // v1.1; "data": null → notFound, a list → decoding
     func query<T: Resource>(_ type: T.Type, filter: [String: String] = [:], sort: [String] = [], page: [String: String] = [:],
                             include: [String] = [], cache: CacheOptions = .default) async throws -> LiveCollection<T>
     func query<T: Resource>(_ type: T.Type, path: String, query: [URLQueryItem] = [], include: [String] = [],
@@ -745,7 +812,7 @@ public struct CachedDocument: Sendable {                          // keys, not c
     func peek<T: Resource>(_ relationship: ToOne<T>) -> Live<T>?
     func peek<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>]
     func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws -> Live<T>?
-    func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default) async throws -> [Live<T>]
+    func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default, strategy: ResolveStrategy? = nil) async throws -> [Live<T>]
 
     // writes
     @discardableResult func save<T: Resource>(_ draft: inout Draft<T>) async throws -> Live<T>
@@ -771,15 +838,16 @@ public final class Live<T: Resource>: Identifiable {
     nonisolated var id: String { get }
 }
 public final class LiveCollection<T: Resource> {
-    private(set) var items: [Live<T>]                             // tombstones filtered out
+    private(set) var items: [Live<T>]                             // tombstones filtered out, duplicates across pages too
     private(set) var links: Links
     private(set) var meta: [String: JSONValue]
     private(set) var state: LoadState
+    private(set) var isReloading: Bool                            // v1.1; true while reload() runs, state stays .loaded
     var autoRefresh: Bool                                         // default true
     let key: RequestKey
     var hasMore: Bool { get }
-    func reload() async throws                                    // first page again; drops appended pages
-    func loadMore() async throws                                  // appends links.next; no-op without one
+    func reload() async throws                                    // every loaded page again, swapped in once; coalesced
+    func loadMore() async throws                                  // appends links.next; no-op without one; waits for a reload
 }
 public enum LoadState: Sendable { case idle, loading, loaded, failed(IonError); var isLoading, isLoaded: Bool; var error: IonError? }
 public struct Draft<T: Resource>: Sendable {
@@ -791,6 +859,25 @@ public struct Draft<T: Resource>: Sendable {
     mutating func revert()
     @MainActor func isStale(against live: Live<T>) -> Bool
 }
+```
+
+```swift
+// SwiftUI/   (Apple platforms only; v1.1)
+public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
+    // one resource: Value == Live<T>
+    init<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default, store: Store? = nil,
+                      @ViewBuilder content: (Live<T>) -> Content,
+                      @ViewBuilder loading: () -> Loading,
+                      @ViewBuilder failed: (IonError, _ retry: @escaping @MainActor () -> Void) -> Failed)
+    // a collection: Value == LiveCollection<T>
+    init<T: Resource>(_ type: T.Type, filter: [String: String] = [:], sort: [String] = [], page: [String: String] = [:],
+                      include: [String] = [], cache: CacheOptions = .default, store: Store? = nil,
+                      content: (LiveCollection<T>) -> Content, loading:, failed:)
+    init<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>, store: Store? = nil,
+                      content: (LiveCollection<T>) -> Content, loading:, failed:)
+    // the same three with `content:` only (ProgressView + FetchFailureView), and with `content:failed:` (ProgressView)
+}
+public struct FetchFailureView: View { init(error: IonError, retry: @escaping @MainActor () -> Void) }   // ContentUnavailableView + "Try Again"
 ```
 
 ```swift
@@ -806,6 +893,7 @@ public final class MockHandler: RequestHandler {
     func respond(to key: String, status: Int, errors: [ErrorObject], headers: … = [:])
     func respond(to key: String, status: Int, headers: … = [:])   // e.g. 204
     func respond(to key: String, data: Data, status: Int = 200, headers: … = [:])
+    func respond(to key: String, throwing error: any Error)      // v1.1; a queued failure, repeated once drained like any entry
     func key(for request: RawRequest) -> String
 }
 public enum Fixtures {
@@ -818,9 +906,35 @@ public enum Fixtures {
 extension Store { func seed<T: Resource>(_ values: [T]) }
 ```
 
-**Not there yet** (so do not code against it): `Fetch<T>` view, `related(\.key)`, ETag / 304, retry handler,
-token refresh, `filter[id]` resolve, POST queries, eviction, persistence, client-generated ids, sparse-fieldset
-merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource `links` / `meta`.
+**Not there yet** (so do not code against it): `related(\.key)`, token refresh, POST queries served from the cache,
+batch mutations ([#11](https://github.com/winsmith/ion-kit/issues/11)), eviction, persistence, client-generated
+ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
+`links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-16, v1.1)
+
+What landed with the v1.x ergonomics pull request beyond the sections above, which are updated in place.
+
+- **Reviewed before coding.** The plan was challenged by three independent reviews (API design, cache and
+  concurrency correctness, SwiftUI consumer) and changed in response: the 304 branch runs before any upsert (an
+  empty 304 document would otherwise blank a collection); no load joins an in-flight GET from before the
+  last mutation or invalidation, and a 304 records `receivedAt` as the send time, so a load after a save cannot
+  mark pre-save data fresh; an explicit `reload()` swaps all pages at once while mutation-driven reloads touch page
+  1 only; `Fetch` passes `retry` to its failure view, keys its task on the store identity too, shows cache hits
+  synchronously, and has no single-resource `request:` form (ambiguous with the collection form under trailing-closure
+  syntax); `RetryHandler` has a transient-error allowlist and gives up on a long `Retry-After`.
+- **`LiveCollection` keeps pages.** `pages: [[ResourceKey]]` (internal) replaces the flat key list; `items`
+  flattens and de-duplicates. A reload runs in one coalesced task per collection; `clear()` bumps a generation that
+  a reload in flight checks after every await, so a logout cannot be undone by a late page.
+- **A slower, older response never replaces a newer document** in the request cache (`receivedAt` of the existing
+  entry versus `sentAt` of the response); resources already had `mutationSequence` for the same purpose.
+- **`CodecError.unexpectedCollection`** is what `find(_:request:)` throws (inside `IonError.decoding`) when a
+  single-resource request is answered with a list.
+- **Not built, on purpose:** POST queries served from the cache and a token-refresh handler (both open questions
+  answered "no"); batch mutations and persistence stay separate PRs. Typed throws still wait for the Swift 6.2
+  decision ([#1](https://github.com/winsmith/ion-kit/issues/1)).
+- **Toolchain.** This pull request was written without a local Swift toolchain; CI (Xcode 16.3, `swift:6.1`,
+  `swift:6.2`) was the compiler.
 
 ## Implementation notes (2026-10-15)
 

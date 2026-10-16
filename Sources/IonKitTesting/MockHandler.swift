@@ -22,9 +22,15 @@ public final class MockHandler: RequestHandler {
     /// Delay before each response, to test in-flight deduplication and cancellation. Default: none.
     public let latency: Duration?
 
+    /// What a queued entry does when served.
+    private enum Outcome {
+        case response(RawResponse)
+        case failure(any Error)
+    }
+
     private struct State {
-        var queues: [String: [RawResponse]] = [:]
-        var lastServed: [String: RawResponse] = [:]
+        var queues: [String: [Outcome]] = [:]
+        var lastServed: [String: Outcome] = [:]
         var requests: [RawRequest] = []
     }
 
@@ -57,7 +63,17 @@ public final class MockHandler: RequestHandler {
     /// Queues a raw response for a key such as `"GET people?include=tags"`.
     public func respond(to key: String, with response: RawResponse) {
         let normalized = Self.normalize(key)
-        state.withLock { $0.queues[normalized, default: []].append(response) }
+        state.withLock { $0.queues[normalized, default: []].append(.response(response)) }
+    }
+
+    /// Queues a failure: the handler throws `error` instead of answering, as `URLSessionHandler` would for a
+    /// transport problem. Like any queued entry it is repeated once the queue is drained, so a failure queued last
+    /// fails every later request for the key; queue a response after it for "fail, then succeed".
+    ///
+    /// Usage: `mock.respond(to: "GET people", throwing: URLError(.timedOut))`
+    public func respond(to key: String, throwing error: any Error) {
+        let normalized = Self.normalize(key)
+        state.withLock { $0.queues[normalized, default: []].append(.failure(error)) }
     }
 
     /// Queues a JSON:API document.
@@ -107,17 +123,17 @@ public final class MockHandler: RequestHandler {
 
     public func handle(_ request: RawRequest, next: @Sendable (RawRequest) async throws -> RawResponse) async throws -> RawResponse {
         let key = key(for: request)
-        let response: RawResponse? = state.withLock { state in
+        let outcome: Outcome? = state.withLock { state in
             state.requests.append(request)
             if var queue = state.queues[key], !queue.isEmpty {
-                let response = queue.removeFirst()
+                let outcome = queue.removeFirst()
                 state.queues[key] = queue
-                state.lastServed[key] = response
-                return response
+                state.lastServed[key] = outcome
+                return outcome
             }
             return state.lastServed[key]
         }
-        guard let response else {
+        guard let outcome else {
             throw IonError.transport(URLError(.unsupportedURL, userInfo: [
                 NSLocalizedDescriptionKey: "MockHandler has no response for \"\(key)\"",
                 NSURLErrorFailingURLErrorKey: request.url,
@@ -127,7 +143,10 @@ public final class MockHandler: RequestHandler {
             try await Task.sleep(for: latency)
         }
         try Task.checkCancellation()
-        return response
+        switch outcome {
+        case .response(let response): return response
+        case .failure(let error): throw error
+        }
     }
 
     // MARK: Keys

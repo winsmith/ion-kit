@@ -74,6 +74,12 @@ public struct Request<Response: Decodable & Sendable>: Sendable {
     }
 }
 
+/// Two requests are equal when every member is, query items in the order given; `RequestKey` sorts the query, so
+/// requests that differ only in query order are unequal here but share one cache entry.
+///
+/// Usage: `.task(id: request) { … }` in a view that refetches when its request changes.
+extension Request: Hashable {}
+
 extension Request where Response == JSONAPIDocument {
     /// A GET for a single resource.
     public static func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) -> Request {
