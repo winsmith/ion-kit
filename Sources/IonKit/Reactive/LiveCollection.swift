@@ -112,6 +112,8 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
         if pages.isEmpty, !state.isLoaded { state = .loading }
         let generation = self.generation
         isReloading = true
+        reloadAgain = false
+        reloadAgainAllPages = false
         let task = Task { @MainActor [self] in
             // Cleared by the task itself, so a reload that arrives after the loop ended starts a new one instead of
             // joining a finished task. `reset()` bumps the generation and does its own cleanup.
@@ -123,13 +125,16 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
                 }
             }
             var all = allPages
-            repeat {
-                reloadAgain = false
-                reloadAgainAllPages = false
+            while true {
                 reloadingAllPages = all
                 try await runReload(allPages: all)
+                // Joiners that arrived during the pass (or before it started) get one more pass.
+                let again = reloadAgain
                 all = reloadAgainAllPages
-            } while reloadAgain
+                reloadAgain = false
+                reloadAgainAllPages = false
+                guard again else { break }
+            }
         }
         reloadTask = task
         do {
