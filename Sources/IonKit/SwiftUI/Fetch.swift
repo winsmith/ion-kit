@@ -28,6 +28,10 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
     @Environment(Store.self) private var environmentStore: Store?
     @State private var phase: Phase = .loading
     @State private var attempt = 0
+    /// The load for `current`. Cancelled when the request, store or attempt changes, not on disappear.
+    @State private var loadTask: Task<Void, Never>?
+    /// The run whose result may still be shown; a finished load for any other run is dropped.
+    @State private var current: Run?
 
     private enum Phase {
         case loading
@@ -120,25 +124,37 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
                 failed(error, retry)
             }
         }
-        .onChange(of: run, initial: true) { _, _ in
-            // Show what the cache has before the task runs, so switching between cached items never flashes.
+        .onChange(of: run, initial: true) { _, run in
+            // Show what the cache has before the load runs, so switching between cached items never flashes.
             if let value = peek(resolvedStore, request) {
                 phase = .loaded(value)
             } else {
                 phase = .loading
             }
+            start(run)
         }
-        .task(id: run) {
-            var request = request
-            if attempt > 0 { request.cache.reload = true }
+    }
+
+    /// Starts the load for `run` in a task of its own rather than `.task(id:)`: SwiftUI can send a view
+    /// `onDisappear` right after `onAppear` and keep showing it (a collapsed `NavigationSplitView` pushing its
+    /// detail column does), which cancels a `.task` that is then never started again and leaves the view loading.
+    /// The request keeps running for other callers either way, so finishing it after a real disappear costs nothing.
+    private func start(_ run: Run) {
+        loadTask?.cancel()
+        current = run
+        var request = request
+        if attempt > 0 { request.cache.reload = true }
+        let store = resolvedStore
+        loadTask = Task {
+            let next: Phase
             do {
-                let value = try await load(resolvedStore, request)
-                if !Task.isCancelled { phase = .loaded(value) }
+                next = .loaded(try await load(store, request))
             } catch {
                 let error = IonError(error)
                 if case .cancelled = error { return }
-                if !Task.isCancelled { phase = .failed(error) }
+                next = .failed(error)
             }
+            if !Task.isCancelled, current == run { phase = next }
         }
     }
 
