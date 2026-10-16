@@ -15,9 +15,11 @@ jobs:
       - run: swift --version
       - run: swift build --build-tests
       - name: swift test
+        shell: bash
         run: set -o pipefail && swift test 2>&1 | tee test.log
       - name: Surface failures as annotations
         if: failure()
+        shell: bash
         run: ./.github/scripts/annotate-failures.sh test.log
 
   linux:
@@ -33,7 +35,9 @@ jobs:
       - run: swift --version
       - run: swift build --build-tests
       - name: swift test
+        shell: bash
         run: set -o pipefail && swift test 2>&1 | tee test.log
       - name: Surface failures as annotations
         if: failure()
+        shell: bash
         run: ./.github/scripts/annotate-failures.sh test.log
