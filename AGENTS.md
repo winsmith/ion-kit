@@ -23,10 +23,12 @@ Tests use swift-testing and `IonKitTesting.MockHandler`; nothing touches the net
 Sources/IonKit/
   Resource/      Resource, ResourceKey, ToOne / ToMany
   WireFormat/    JSONValue, JSONAPIDocument, ResourceObject, ErrorObject, Links, ResourceCodec
-  Requests/      Request, RawRequest, RawResponse, RequestHandler, URLSessionHandler, BearerTokenHandler, LoggingHandler
+  Requests/      Request, RawRequest, RawResponse, RequestHandler, URLSessionHandler, BearerTokenHandler, LoggingHandler, RetryHandler
   Cache/         ResourceCache (identity map), RequestCache, CachePolicy
   Store/         Store, Store+Find, Store+Query, Store+Save, Store+Relationships
   Reactive/      Live, LiveCollection, Draft, LoadState
+  SwiftUI/       Fetch, FetchFailureView (behind `#if canImport(SwiftUI)`; not built on Linux, so CI's macOS job is
+                 the only one that compiles it)
   IonError.swift
 Sources/IonKitTesting/   MockHandler, Fixtures, Store.seed
 Tests/IonKitTests/       one file per source folder; fixtures under Resources/ (*.synthetic.json until real

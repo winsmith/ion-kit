@@ -10,9 +10,12 @@ public enum CodecError: Error, Sendable, CustomStringConvertible {
     case notAnObject
     /// A relationship on a draft references a client-local placeholder id.
     case localRelationship(String)
+    /// A single-resource request was answered with a collection.
+    case unexpectedCollection(path: String)
 
     public var description: String {
         switch self {
+        case .unexpectedCollection(let path): "expected a single resource from \"\(path)\", got a collection"
         case .typeMismatch(let expected, let found): "expected resource type \"\(expected)\", found \"\(found)\""
         case .missingID(let type): "resource of type \"\(type)\" has no id"
         case .notAnObject: "resource did not encode to a JSON object"

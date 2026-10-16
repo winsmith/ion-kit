@@ -70,6 +70,45 @@ extension IonError {
     }
 }
 
+/// `localizedDescription` is phrased for people, not logs: no status codes in prose, no decoder dumps. `Fetch`'s
+/// default failure view shows it; `description` stays the developer-facing form.
+///
+/// Usage: `Text(error.localizedDescription)`
+extension IonError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .transport(let error):
+            switch error.code {
+            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff:
+                return "You appear to be offline."
+            case .timedOut:
+                return "The server took too long to respond."
+            default:
+                return "The server could not be reached."
+            }
+        case .http(let status, let errors):
+            if let detail = errors.compactMap({ $0.detail ?? $0.title }).first, !detail.isEmpty { return detail }
+            switch status {
+            case 401: return "You need to sign in again."
+            case 403: return "You are not allowed to do that."
+            case 404: return "This item could not be found."
+            case 409, 412: return "This item was changed elsewhere."
+            case 422: return "The server rejected the change."
+            case 500...: return "The server reported an error."
+            default: return "The request failed."
+            }
+        case .notFound:
+            return "This item could not be found."
+        case .decoding:
+            return "The server's response could not be read."
+        case .invalidDraft:
+            return "This change cannot be saved as it is."
+        case .cancelled:
+            return "The request was cancelled."
+        }
+    }
+}
+
 extension IonError: CustomStringConvertible {
     public var description: String {
         switch self {

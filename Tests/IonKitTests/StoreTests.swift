@@ -132,8 +132,10 @@ struct StoreReadTests {
         #expect(mock.requests.count == 2, "no next link: loadMore is a no-op")
 
         try await collection.reload()
-        #expect(collection.items.map(\.id) == ["42", "43"], "reload drops appended pages")
-        #expect(mock.requests.count == 3)
+        #expect(collection.items.map(\.id) == ["42", "43", "44"], "reload refetches every loaded page")
+        #expect(mock.requests.count == 4)
+        #expect(collection.pages.count == 2)
+        #expect(!collection.isReloading)
     }
 
     @Test func sameQuerySharesOneCollection() async throws {

@@ -17,11 +17,14 @@ public final class Store {
     @ObservationIgnored public let codec: ResourceCodec
     /// Decides fresh / stale / expired for cached documents; overridable per store.
     @ObservationIgnored public var cachePolicy: any CachePolicy
+    /// How `resolve(_ relationship: ToMany)` fetches ids that are not cached. Default: one `find` per id.
+    /// Usage: `store.resolveStrategy = .batched()` for a server that supports `filter[id]=1,2,3`.
+    @ObservationIgnored public var resolveStrategy: ResolveStrategy = .oneByOne
 
     @ObservationIgnored let chain: HandlerChain
     @ObservationIgnored let resources = ResourceCache()
     @ObservationIgnored let requests = RequestCache()
-    @ObservationIgnored var inflight: [RequestKey: Task<Fetched, any Error>] = [:]
+    @ObservationIgnored var inflight: [RequestKey: InFlight] = [:]
     @ObservationIgnored var collections: [RequestKey: WeakCollection] = [:]
     /// Incremented on every successful local mutation; entries remember the value at their last mutation.
     @ObservationIgnored var mutationCounter = 0
@@ -59,12 +62,13 @@ public final class Store {
         requests.invalidate(key: key)
     }
 
-    /// Drops every cached resource and document, for logout. Alive collections become empty until reloaded.
+    /// Drops every cached resource and document, for logout. Alive collections become empty (`state == .idle`)
+    /// until reloaded; a reload running at that moment is cancelled and cannot bring old data back.
     public func clear() {
         resources.removeAll()
         requests.removeAll()
         for collection in aliveCollections(ofType: nil) {
-            collection.apply(CachedDocument(primary: [], isCollection: true, op: .query))
+            collection.reset()
         }
     }
 
@@ -114,23 +118,35 @@ public final class Store {
 
     /// Runs the request (deduplicated with other in-flight GETs of the same key), decodes the primary objects as
     /// `T` off the main actor, then upserts everything and records the document.
-    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw: RawRequest, key: RequestKey, as type: T.Type) async throws -> CachedDocument {
+    ///
+    /// A GET whose cached document has an `ETag` is sent with `If-None-Match`; a 304 refreshes the cached entry
+    /// without touching any resource. A caller joins an in-flight GET only when that request started after the
+    /// key's last invalidation and no mutation succeeded since, so a load after a save never adopts a response the
+    /// server produced before the save.
+    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw original: RawRequest, key: RequestKey, as type: T.Type) async throws -> CachedDocument {
         let startSequence = mutationCounter
-        let fetched: Fetched
+        var raw = original
+        if request.method == .get, let etag = requests[key]?.etag, !raw.hasHeader("If-None-Match") {
+            raw.headers["If-None-Match"] = etag
+        }
+        var fetched: Fetched
         if request.method == .get {
-            let task: Task<Fetched, any Error>
+            let flight: InFlight
             var owned = false
-            if let existing = inflight[key] {
-                task = existing
+            if let existing = inflight[key], canJoin(existing, key: key) {
+                flight = existing
             } else {
                 let chain = self.chain
-                task = Task.detached { try await Store.perform(raw, chain: chain) }
-                inflight[key] = task
+                let conditional = raw
+                let sentAt = Date()
+                let task = Task.detached { try await Store.perform(conditional, chain: chain, sentAt: sentAt) }
+                flight = InFlight(task: task, startedAt: sentAt, startSequence: startSequence)
+                inflight[key] = flight
                 owned = true
             }
-            defer { if owned { inflight[key] = nil } }
+            defer { if owned, inflight[key]?.task == flight.task { inflight[key] = nil } }
             do {
-                fetched = try await task.value
+                fetched = try await flight.task.value
             } catch {
                 throw IonError(error)
             }
@@ -142,11 +158,35 @@ public final class Store {
                 throw IonError(error)
             }
         }
+        if fetched.response.status == 304 {
+            if let entry = requests[key] {
+                let refreshed = entry.revalidated(at: fetched.sentAt, response: fetched.response)
+                requests[key] = refreshed
+                return refreshed
+            }
+            // Nothing left to revalidate (cleared mid-flight, or a server answering 304 unprompted): fetch outright.
+            var unconditional = raw
+            unconditional.headers = unconditional.headers.filter { $0.key.lowercased() != "if-none-match" }
+            do {
+                fetched = try await Store.perform(unconditional, chain: chain)
+            } catch {
+                throw IonError(error)
+            }
+            guard fetched.response.status != 304 else { throw IonError.http(status: 304, errors: []) }
+        }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
         return ingest(fetched, typed: typed, request: request, key: key, startSequence: startSequence)
     }
 
-    /// Writes a response into both caches and tells the alive collection for the key, if any.
+    /// Whether a caller may adopt an in-flight GET instead of starting its own.
+    private func canJoin(_ flight: InFlight, key: RequestKey) -> Bool {
+        guard flight.startSequence == mutationCounter else { return false }
+        guard let invalidatedAt = requests[key]?.invalidatedAt else { return true }
+        return flight.startedAt > invalidatedAt
+    }
+
+    /// Writes a response into both caches and tells the alive collection for the key, if any. The request cache
+    /// keeps a newer document over a slower response that was sent earlier.
     @discardableResult
     func ingest<T: Resource>(_ fetched: Fetched, typed: [ResourceKey: T], request: Request<JSONAPIDocument>, key: RequestKey, startSequence: Int) -> CachedDocument {
         let document = fetched.document
@@ -165,10 +205,14 @@ public final class Store {
             op: request.op,
             receivedAt: fetched.receivedAt,
             types: request.cache.types,
-            serverExpiry: CacheHeaders.expiry(of: fetched.response, receivedAt: fetched.receivedAt)
+            serverExpiry: CacheHeaders.expiry(of: fetched.response, receivedAt: fetched.receivedAt),
+            etag: fetched.response.header("ETag")
         )
         let cacheable = request.method == .get || request.cache.key != nil
         if cacheable, !CacheHeaders.directives(in: fetched.response).noStore, document.errors == nil {
+            if let existing = requests[key], existing.receivedAt > fetched.sentAt {
+                return cached   // a response to a later request already landed
+            }
             requests[key] = cached
             collections[key]?.value?.apply(cached)
         }
@@ -176,7 +220,8 @@ public final class Store {
     }
 
     /// Runs the handler chain and decodes the wire document. Nonisolated, so it leaves the main actor.
-    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain) async throws -> Fetched {
+    /// A 304 to a GET comes back as an empty document with the response attached; every other non-2xx throws.
+    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain, sentAt: Date = Date()) async throws -> Fetched {
         let response: RawResponse
         do {
             response = try await chain.perform(raw)
@@ -184,12 +229,15 @@ public final class Store {
             throw IonError(error)
         }
         let receivedAt = Date()
+        if response.status == 304, raw.method == .get {
+            return Fetched(document: JSONAPIDocument(), response: response, receivedAt: receivedAt, sentAt: sentAt)
+        }
         guard response.isSuccess else {
             let errors = (try? JSONAPIDocument.decode(response.data))?.errors ?? []
             throw IonError.http(status: response.status, errors: errors)
         }
         do {
-            return Fetched(document: try JSONAPIDocument.decode(response.data), response: response, receivedAt: receivedAt)
+            return Fetched(document: try JSONAPIDocument.decode(response.data), response: response, receivedAt: receivedAt, sentAt: sentAt)
         } catch {
             throw IonError.decoding(nil, error)
         }
@@ -227,10 +275,17 @@ public final class Store {
 
     /// `find` with plain `throws`, for generic callers inside the package (see `ResourceCache.live`).
     func findLive<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T> {
-        let request = Request<JSONAPIDocument>.find(T.self, id: id, include: include, cache: cache)
+        try await findLive(T.self, request: .find(T.self, id: id, include: include, cache: cache))
+    }
+
+    /// `find(_:request:)` with plain `throws` (see `ResourceCache.live`).
+    func findLive<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> Live<T> {
         let document = try await load(request, as: T.self)
+        guard !document.isCollection else {
+            throw IonError.decoding(nil, CodecError.unexpectedCollection(path: request.path))
+        }
         guard let key = document.primary.first else {
-            throw IonError.notFound(ResourceKey(T.self, id: id))
+            throw IonError.notFound(request.records.first ?? ResourceKey(type: T.resourceType, id: request.path))
         }
         return try liveResource(for: key, as: T.self)
     }
@@ -256,6 +311,24 @@ struct Fetched: Sendable {
     var document: JSONAPIDocument
     var response: RawResponse
     var receivedAt: Date
+    /// When the request left the store; a 304 validates the cached document as of this instant.
+    var sentAt: Date
+}
+
+/// A GET on its way, shared by every caller of the same key.
+struct InFlight {
+    let task: Task<Fetched, any Error>
+    let startedAt: Date
+    /// The store's mutation counter when the request started.
+    let startSequence: Int
+}
+
+extension RawRequest {
+    /// Case-insensitive header presence.
+    func hasHeader(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        return headers.keys.contains { $0.lowercased() == lowered }
+    }
 }
 
 /// A weak reference into the collection registry.
