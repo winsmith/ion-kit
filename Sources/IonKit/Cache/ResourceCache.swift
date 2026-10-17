@@ -54,7 +54,7 @@ final class ResourceCache {
     /// Stores an object without a typed value.
     @discardableResult
     func upsert(_ object: ResourceObject, codec: ResourceCodec, startSequence: Int) -> Bool {
-        upsert(object, typed: Optional<NoResource>.none, codec: codec, startSequence: startSequence)
+        upsert(object, typed: NoResource?.none, codec: codec, startSequence: startSequence)
     }
 
     /// The live instance for a key, decoding the raw entry on first typed access. Nil when the key is unknown.

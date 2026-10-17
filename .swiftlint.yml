@@ -12,7 +12,6 @@ excluded:
 
 trailing_comma:
   mandatory_comma: true # multi-line collection literals end with a comma
-force_try: warning # IonKitTesting crashes on purpose when a fixture fails to encode
 line_length: 200
 type_body_length:
   warning: 400
