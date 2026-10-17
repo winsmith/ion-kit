@@ -30,10 +30,15 @@ public final class Live<T: Resource>: Identifiable, AnyLiveResource {
 
     nonisolated public var id: String { key.id }
 
-    init(key: ResourceKey, value: T, raw: ResourceObject, updatedAt: Date = Date()) {
+    /// The store whose cache holds this instance; weak, so an instance a view keeps does not keep a cleared-away
+    /// store alive. Nil once the store is gone, and then `related` returns nothing.
+    @ObservationIgnored private(set) weak var store: Store?
+
+    init(key: ResourceKey, value: T, raw: ResourceObject, store: Store? = nil, updatedAt: Date = Date()) {
         self.key = key
         self.value = value
         self.raw = raw
+        self.store = store
         self.updatedAt = updatedAt
     }
 
@@ -53,6 +58,28 @@ public final class Live<T: Resource>: Identifiable, AnyLiveResource {
 
     func markDeleted(_ deleted: Bool) {
         if isDeleted != deleted { isDeleted = deleted }
+    }
+}
+
+extension Live {
+    /// The cached, not deleted instances a to-many relationship of this resource points at, in id order and
+    /// without duplicates. Observable: a view calling it re-renders when the ids change, when one of the related
+    /// resources arrives in the cache or leaves it, and when one is deleted. Never sends a request; call
+    /// `store.resolve(_:)` to fetch the ones that are missing, and this updates when they land.
+    ///
+    /// Usage: `ForEach(person.related(\.tags)) { tag in Text(tag.value.name) }`
+    public func related<R: Resource>(_ keyPath: KeyPath<T, ToMany<R>>) -> [Live<R>] {
+        let relationship = value[keyPath: keyPath]
+        return store?.related(relationship) ?? []
+    }
+
+    /// The cached, not deleted instance a to-one relationship of this resource points at; nil when it is not
+    /// cached, deleted, `.null` or `.unloaded`. Observable like the to-many form; never sends a request.
+    ///
+    /// Usage: `if let group = person.related(\.group) { Text(group.value.name) }`
+    public func related<R: Resource>(_ keyPath: KeyPath<T, ToOne<R>>) -> Live<R>? {
+        let relationship = value[keyPath: keyPath]
+        return store?.related(relationship)
     }
 }
 

@@ -6,9 +6,9 @@
 > 2026-10-15 and was moved into the repository, with the revisions listed under
 > [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
 > on 2026-10-16, v1.2 (two fixes found in the Village app), v1.3 (the request outcome observer, `batch` and
-> DELETE 404 as success), v1.4 (the cache snapshot), v1.5 (typed throws on Swift 6.2) and v1.6 (LRU eviction) on
-> 2026-10-17. Consumers of the library start at
-> [Current state of the code](#current-state-of-the-code-v16-2026-10-17). Change the code and this file in the same
+> DELETE 404 as success), v1.4 (the cache snapshot), v1.5 (typed throws on Swift 6.2), v1.6 (LRU eviction) and v1.7
+> (observable `related`) on 2026-10-17. Consumers of the library start at
+> [Current state of the code](#current-state-of-the-code-v17-2026-10-17). Change the code and this file in the same
 > pull request.
 
 ## Purpose and goals
@@ -28,7 +28,7 @@ IonKit is a Swift package that lets a SwiftUI app display and edit structs that 
 **Non-goals for v1** (some return in later milestones, see Development milestones)
 
 - Offline writes, optimistic UI, conflict resolution.
-- Typed, live-resolving relationship properties; relationship inverses; polymorphic relationships.
+- Relationship inverses; polymorphic relationships (typed, live-resolving relationships arrived in v1.7 as `related`; see Relationships and includes).
 - Persistent cache on disk (arrived in v1.4 as a snapshot file; see Cache).
 - Sparse fieldsets and field-level merging of partial resources.
 - Code generation or macros for resource definitions.
@@ -223,7 +223,7 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted by default; a Village graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below); since v1.6 a store can cap the resource cache and evict the least recently used resources (see Eviction below).
 
-**Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `AnyObject` and read as `any AnyLiveResource`, so eviction can check whether anything else holds it), `isDeleted`, a `mutationSequence` and, since v1.6, a `lastUsed` stamp. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` drops every entry; eviction (v1.6, opt-in) drops the least recently used ones that nothing holds.
+**Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `AnyObject` and read as `any AnyLiveResource`, so eviction can check whether anything else holds it), `isDeleted`, a `mutationSequence` and, since v1.6, a `lastUsed` stamp. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` drops every entry; eviction (v1.6, opt-in) drops the least recently used ones that nothing holds. Since v1.7 the cache holds its store weakly and hands it to every `Live` it creates, and keeps one observable counter per resource type (`TypeRevision`) that `related` reads; the cache bumps it when a key of that type is added or removed (a new entry, eviction, `clear()`, a snapshot restore), never when an existing entry changes.
 
 **Request cache** — `[RequestKey: CachedDocument]` where `CachedDocument` holds `primary: [ResourceKey]`, `included: [ResourceKey]`, `links`, `meta`, `receivedAt`, `invalidatedAt`, an optional `types: Set<String>`, `serverExpiry` and the response's `etag`. It stores keys, not copies, so a cached collection always materializes from the current live instances. `RequestKey` = method + resolved URL with sorted query, or `cache.key` when set (required to cache a POST query). A response to a request that was sent before a newer document for the same key landed does not replace that document.
 
@@ -258,18 +258,18 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 - *Protection.* IonKit takes a URL and does nothing else to the file: the app chooses the directory and its file protection (on iOS a new file gets the app's default protection class).
 - *Gaps.* `peek` and `resolve` serve a restored resource without revalidating it, because they never consult the request cache (the same as for a resource included by an earlier response). Pages appended by `loadMore()` are cached under their own keys and revalidate on their next load like any document, but a restored collection shows only its first page until `loadMore()` runs.
 
-**Eviction (v1.6).** `Store(maxCachedResources:)` (also settable later) caps the resource cache; `nil`, the default, keeps everything as before. Every entry carries a `lastUsed` stamp from a counter in the resource cache that advances on every write (upsert, tombstone, a successful mutation) and every typed read (`peek`, `find`, `resolve`, a collection materializing its items, `Fetch`'s synchronous lookup). A cached document served again (a fresh or stale hit, a 304) stamps every resource it lists, so a resource is never colder than a document that lists it. After each operation that adds entries (an ingested response, `upsert`, `save`, `delete`, `loadSnapshot()`) and whenever the cap is lowered, the store evicts while it holds more than the cap, coldest first, skipping:
+**Eviction (v1.6).** `Store(maxCachedResources:)` (also settable later) caps the resource cache; `nil`, the default, keeps everything as before. Every entry carries a `lastUsed` stamp from a counter in the resource cache that advances on every write (upsert, tombstone, a successful mutation) and every typed read (`peek`, `related`, `find`, `resolve`, a collection materializing its items, `Fetch`'s synchronous lookup). A cached document served again (a fresh or stale hit, a 304) stamps every resource it lists, so a resource is never colder than a document that lists it. After each operation that adds entries (an ingested response, `upsert`, `save`, `delete`, `loadSnapshot()`) and whenever the cap is lowered, the store evicts while it holds more than the cap, coldest first, skipping:
 
 - resources stamped by the operation that triggered the pass, so a response larger than the cap is kept whole and `find` can return its instance;
 - a resource whose `Live` is held outside the cache: by a view, a `Fetch`, a variable, a collection's `items` (checked with `isKnownUniquelyReferenced`, so the check adds no reference). This is what keeps "one `Live<T>` per key" true: an instance anyone can still see is never dropped from the identity map;
 - the loaded pages of every alive collection and every key, included ones too, of its cached first page;
 - a resource mutated locally after the oldest fetch still in progress started: its `mutationSequence` is what makes that fetch's response lose against the save, and a recreated entry would not remember it.
 
-Evicting a resource removes every cached document that lists it, as primary or included data, so a document never materializes with gaps; its next load fetches and waits, as for an expired document. Documents themselves are not counted. The cap is a target, not a limit: when everything left is in use the store holds more, and the next pass catches up. Entries restored from a snapshot are stamped 0 (older than anything used since) and evicted in key order; a capped store's snapshot holds what survived. A dropped `Live` that nobody held cannot be observed, so eviction never changes what a view shows; a later access decodes the next response into a new instance.
+Evicting a resource removes every cached document that lists it, as primary or included data, so a document never materializes with gaps; its next load fetches and waits, as for an expired document. Documents themselves are not counted. The cap is a target, not a limit: when everything left is in use the store holds more, and the next pass catches up. Entries restored from a snapshot are stamped 0 (older than anything used since) and evicted in key order; a capped store's snapshot holds what survived. A dropped `Live` that nobody held cannot be observed, so eviction never changes what a view shows through a `Live` it holds; a later access decodes the next response into a new instance. `related` (v1.7) reflects the cache, so a view that only counts `person.related(\.tags)` without holding the instances can see an evicted tag leave, and re-renders when it does; a view that shows them holds them.
 
 The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`. `clear()` resets every alive collection to `.idle` with no items and cancels a reload it may be running, so a logout mid-reload cannot bring old data back.
 
-**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. Since v1.6, `maxCachedResources` bounds how many resources stay cached once no view holds them (see Eviction under Cache).
+**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. Since v1.7 `Live` holds its store weakly too, so that `related` can reach the cache; an instance that outlived its store returns nothing from `related`. Since v1.6, `maxCachedResources` bounds how many resources stay cached once no view holds them (see Eviction under Cache).
 
 ## Live instances, SwiftUI and concurrency
 
@@ -284,6 +284,9 @@ public final class Live<T: Resource>: Identifiable {
     public private(set) var isDeleted = false
     public private(set) var updatedAt: Date
     nonisolated public var id: String { key.id }    // Identifiable's witness must be nonisolated
+    weak var store: Store?                          // v1.7; for related(_:), nil after the store died
+    public func related<R: Resource>(_ keyPath: KeyPath<T, ToMany<R>>) -> [Live<R>]   // v1.7; observable, cache only
+    public func related<R: Resource>(_ keyPath: KeyPath<T, ToOne<R>>) -> Live<R>?
 }
 
 @MainActor @Observable
@@ -397,13 +400,17 @@ The diff is computed by encoding `value` and `original` with the codec to `JSONV
 
 ## Relationships and includes
 
-In v1 a relationship is a set of ids on the struct; resolving them is an explicit store call. Included resources ride along in every response and land in the cache like primary ones, so after `find(Person.self, id:, include: ["tags", "group"])` the lookups below are cache hits.
+In v1 a relationship is a set of ids on the struct; fetching them is an explicit store call, and since v1.7 `related` reads the cached targets observably. Included resources ride along in every response and land in the cache like primary ones, so after `find(Person.self, id:, include: ["tags", "group"])` the lookups below are cache hits.
 
 `swift
 let person = try await store.find(Person.self, id: "42", include: ["tags"])
 let tags: [Live<Tag>] = store.peek(person.value.tags)         // whatever is cached, in id order
 let group: Live<Group>? = store.peek(person.value.group)
 let allTags = try await store.resolve(person.value.tags)      // peek, then find the missing ones
+
+ForEach(person.related(\.tags)) { tag in TagChip(tag) }      // v1.7: observable, re-renders when a tag lands
+let current: Live<Group>? = person.related(\.group)          // nil when not cached or deleted
+let picked = store.related(draft.value.tags)                 // the same for any relationship value
 `
 
 - `peek(_:)` is synchronous and never hits the network; it returns only the instances present in the cache, decoding a raw included entry on first access.
@@ -411,7 +418,14 @@ let allTags = try await store.resolve(person.value.tags)      // peek, then find
 - Setting a relationship on a draft is assignment: `draft.value.tags.ids = ["7", "9"]`; `save` sends it as `relationships.tags.data`. Relationship `links` and the separate relationship endpoints are not used.
 - There is no inverse maintenance: adding a tag to a person does not update the tag's `people` relationship locally; the next response that includes the tag does.
 
-**v2: typed resolution.** `Live<T>` gains `related(\.tags) -> [Live<Tag>]` computed from the cache and observable, so a view can write `ForEach(person.related(\.tags))` and re-render when a tag arrives later. This is purely additive on top of the id-based model, which is why ids-only is the right v1.
+**Typed resolution (v1.7).** `Live<T>.related(\.tags) -> [Live<Tag>]` and `related(\.group) -> Live<Group>?` read the relationship from the instance's current `value` and return what the cache holds for it; `store.related(_:)` does the same for any `ToOne` / `ToMany` value, a draft's included. It is `peek` made for views, purely additive on top of the id-based model:
+
+- *Cache only.* It never sends a request. A view that wants the gaps filled calls `resolve` (or loads with `include`), and `related` updates when the response lands.
+- *Id order, without duplicate ids and without deleted resources*, the rules `LiveCollection.items` applies, so the result goes straight into `ForEach`. `.unloaded` and `.null` give `[]` / `nil`. `peek` and `resolve` keep returning tombstones and duplicates.
+- *Observable.* Called from a view body (or inside `withObservationTracking`), it re-runs when the parent's `value` changes (new ids), when a resource of the related type enters or leaves the cache (a response, `upsert`, a snapshot restore, eviction, `clear()`), and when one of the returned instances is deleted or revived. It reads one observable counter per resource type (`TypeRevision`), which the cache bumps only when its set of keys of that type changes. Changes to an existing resource are observed on its own `Live` by whoever reads its `value`, so a list of 500 rows calling `related(\.tags)` recomputes when a tag is added or dropped, not when one is renamed.
+- *A typed read.* Like `peek`, it decodes a raw included entry on first access and counts as a use for eviction.
+- `Live.related` on an instance whose store is gone returns `[]` / `nil`.
+- *Gap.* A cached resource that does not decode as the related type is skipped, as by `peek`. If a later response makes it decodable, a view showing `related` picks it up on its next re-render rather than at once: no key was added and there is no `Live` to observe yet. That needs the struct and the server to disagree, so it is documented rather than handled.
 
 ## Platforms and dependencies
 
@@ -439,7 +453,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Any JSON:API 1.1 server is the target; Village is the first consumer and fixture source | Nothing app-specific in the package; spec-optional members stay optional in IonKit |
 | Read through immutable `Live<T>`, edit through `Draft<T>` | Mirrors WarpDrive checkout; keeps local state out of the cache; structs stay plain |
 | Minimum macOS 15 / iOS 18, Swift 6 strict concurrency | Observation, typed throws and modern concurrency without compatibility shims |
-| Relationships are ids + `peek`/`resolve` in v1 | Typed resolution is additive later; avoids a relationship graph in v1 |
+| Relationships are ids + `peek`/`resolve` in v1 | Typed resolution is additive later (it came in v1.7 as `related`); avoids a relationship graph in v1 |
 | Store and caches are `@MainActor`, not an actor | Observation and SwiftUI read synchronously; network and decoding stay off-main anyway |
 | Flat structs decoded via merge-then-`JSONDecoder`; relationship keys captured during encoding | Keeps `Codable` synthesis; no macros, property wrappers, reflection or type registry |
 | Included resources stay raw until first typed access | The store cannot map a wire type string to a Swift type without a registry; lazy decoding needs none |
@@ -462,6 +476,12 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Eviction is opt-in, one cap on resources (`maxCachedResources`), least recently used first; held instances, alive collections, the triggering response and resources a pending fetch could revert are never evicted, so the cap is a target (2026-10-17, v1.6) | Resources are what take memory; documents are lists of keys and go with the resources they list. A hard limit would have to drop an instance a view still shows, breaking one `Live<T>` per key |
 | Evicting a resource removes every cached document that lists it (2026-10-17, v1.6) | Materializing skips missing keys, so a kept document would silently show a shorter list; a document is never hotter than its resources, so it was next anyway |
 | The eviction release is 1.6.0, not 2.0 (2026-10-17) | It is additive and off by default; the v2 list stays the backlog, and each item ships as a minor release when it lands |
+| `related` is observable through one counter per resource type, bumped when a key of that type enters or leaves the cache; changes to existing resources are observed on their `Live` (2026-10-17, v1.7) | Making the entries dictionary observable would re-render a view on every typed read, since each read stamps `lastUsed`; one observable per key needs an object for every *missing* key, which is exactly what `related` waits for. Per type, a list of rows recomputes only when the related type gains or loses a key |
+| `related` skips deleted resources and duplicate ids; `peek` and `resolve` do not (2026-10-17, v1.7) | `related` feeds `ForEach`, where a duplicate id is a runtime warning and a deleted row should vanish: the rules of `LiveCollection.items`. `peek` keeps its contract, so no existing caller changes |
+| `related` never fetches (2026-10-17, v1.7) | A view body must stay synchronous and free of requests; `resolve` is the explicit fetch, and `related` follows its result |
+| `Live` holds its store weakly (2026-10-17, v1.7) | `related` on an instance needs the cache; weak like `LiveCollection.store`, so a view holding an instance never keeps a logged-out store alive |
+| With a cap, a view reading `related` without holding the instances can see one evicted (2026-10-17, v1.7) | A view that shows the instances holds them, and held instances are never evicted; one that only counts them sees the cache as it is and re-renders when it changes |
+| The typed-relationships release is 1.7.0 (2026-10-17) | Additive; no behavior of existing API changes |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors. Default rules stay on, with trailing commas required in multi-line collection literals (the style the code already used); short names such as `op` are suppressed at their declaration with a reason, not turned off repo-wide |
@@ -490,7 +510,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v17["v1.7 Typed relationships ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -554,7 +574,13 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] Never evicted: a `Live` held outside the cache, what alive collections list, the response being stored, a resource a pending fetch could revert.
 - [x] `loadSnapshot()` trims to the cap; `resolve` with `.batched` refetches a resource a later batch evicted.
 
-**v2 — Depth**: `related(\.key)` observable relationship resolution; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
+**v1.7 — Typed relationship resolution** (the next item from the v2 list) — done 2026-10-17
+
+- [x] `Live.related(\.toMany) -> [Live<R>]` and `Live.related(\.toOne) -> Live<R>?`; `store.related(_:)` for any relationship value, a draft's included.
+- [x] Observable through one `TypeRevision` per resource type, bumped when a key is added (response, `upsert`, snapshot restore) or removed (eviction, `clear()`); parent id changes and deletions are observed on the instances.
+- [x] Deleted resources and duplicate ids skipped; never fetches; counts as a use for eviction; `Live` holds its store weakly.
+
+**v2 — Depth**: `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
 **v3 — Offline writes**: optional offline write queue built on `Draft` values, persisted next to the cache snapshot (which shipped in v1.4); conflict detection via a `version` attribute.
 
@@ -605,32 +631,32 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v1.6, 2026-10-17)
+## Current state of the code (v1.7, 2026-10-17)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as of the v1.6 pull request on 2026-10-17; update it
+signatures are, and what to rely on. It describes the package as of the v1.7 pull request on 2026-10-17; update it
 in the same pull request as any public API change.
 
 **Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page reload,
 ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`,
-DELETE 404 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum) and v1.6 (LRU eviction) are
-implemented in `Sources/IonKit` (about 3,750 lines) with `Sources/IonKitTesting` (about 240 lines) and 124
-swift-testing tests that pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with Xcode 26. Of the
-v2 list only eviction exists; nothing on the v3 list does. There is no sample app and the
+DELETE 404 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction) and v1.7
+(observable `related`) are implemented in `Sources/IonKit` (about 3,850 lines) with `Sources/IonKitTesting` (about
+240 lines) and 143 swift-testing tests that pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with
+Xcode 26. Of the v2 list eviction and `related` exist; nothing on the v3 list does. There is no sample app and the
 fixtures are synthetic.
 
 **Depending on it.**
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.6.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.7.0"),
 …
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
 Platforms: macOS 15, iOS 18, Linux. Toolchain: Swift 6.2 or later (Xcode 26). Swift 6 language mode with strict
-concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, …) following semantic
+concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, `1.7.0`, …) following semantic
 versioning; depend on a version range (`from:`) rather than `main`. A release is cut by merging its pull request and tagging the merge commit on `main`.
 
 **Behaviors to rely on.**
@@ -675,6 +701,10 @@ versioning; depend on a version range (`from:`) rather than `main`. A release is
   document that lists one. A `Live` that anything outside the store holds, whatever an alive collection lists and
   the response just received are never evicted, so the count can exceed the cap while they are in use. An evicted
   resource's next load fetches; a `peek` returns nil for it. Without a cap nothing is evicted.
+- `person.related(\.tags)` / `related(\.group)` and `store.related(_:)` return the cached, not deleted instances in
+  id order without duplicates and never send a request. They are observable: a view re-renders when a related
+  resource arrives, leaves the cache or is deleted, and when the relationship's ids change. A rename re-renders
+  only views that read the renamed instance's `value`. Fill gaps with `resolve`.
 - `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
@@ -923,6 +953,8 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
     func peek<T: Resource>(_ type: T.Type, key: ResourceKey) -> Live<T>?
     func peek<T: Resource>(_ relationship: ToOne<T>) -> Live<T>?
     func peek<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>]
+    func related<T: Resource>(_ relationship: ToOne<T>) -> Live<T>?          // v1.7; observable peek; deleted → nil
+    func related<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>]        // v1.7; deleted and duplicate ids skipped
     func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws(IonError) -> Live<T>?
     func resolve<T: Resource>(_ relationship: ToMany<T>, cache: CacheOptions = .default, strategy: ResolveStrategy? = nil) async throws(IonError) -> [Live<T>]
 
@@ -953,6 +985,8 @@ public final class Live<T: Resource>: Identifiable {
     private(set) var isDeleted: Bool
     private(set) var updatedAt: Date
     nonisolated var id: String { get }
+    func related<R: Resource>(_ keyPath: KeyPath<T, ToMany<R>>) -> [Live<R>]   // v1.7; observable, cache only
+    func related<R: Resource>(_ keyPath: KeyPath<T, ToOne<R>>) -> Live<R>?    // v1.7; nil when not cached or deleted
 }
 public final class LiveCollection<T: Resource> {
     private(set) var items: [Live<T>]                             // tombstones filtered out, duplicates across pages too
@@ -1023,11 +1057,33 @@ public enum Fixtures {
 extension Store { func seed<T: Resource>(_ values: [T]) }
 ```
 
-**Not there yet** (so do not code against it): `related(\.key)`, token refresh, POST queries served from the cache,
+**Not there yet** (so do not code against it): token refresh, POST queries served from the cache,
 a batched request format (`batch` coalesces reloads; each save is still its own request), eviction of documents on
 their own or by size in bytes, an offline write queue, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-17, v1.7)
+
+- **One counter per type.** `ResourceCache` keeps `[String: TypeRevision]`, a `@MainActor @Observable` class with one
+  `value`. `Store.related` reads the counter of the related type before it peeks, so Observation tracks it; the
+  cache bumps it in the new-key branch of `upsert`, in `remove` (eviction), in `restore` (snapshot) and in
+  `removeAll` (`clear()`). Updates, the raw-to-typed decode and tombstones do not bump: `related` reads `isDeleted`
+  on every candidate, so a delete or a revival re-renders through the instance.
+- **Created on read, never dropped.** A counter is created the first time `related` asks for its type, so types no
+  view watches cost nothing, and a bump of a type without one is a no-op. `removeAll` bumps every counter and keeps
+  the objects: tracking is tied to object identity, and a fresh counter after `clear()` would leave every cleared
+  view waiting on an object nobody bumps.
+- **Back-reference.** `ResourceCache.store` is weak and set at the end of `Store.init`; the three places that
+  create a `Live` pass it on. `resources` is a `let` with a default value and `maxCachedResources`'s `didSet` does
+  not run inside `init`, so no instance is created before the reference is set.
+- **Deduplicated for `ForEach`.** `peek` returns `ids(["9", "7", "9"])` as three instances and a test relies on it;
+  `related` returns two, the first occurrence of each.
+- **Testing observation without SwiftUI.** The tests register `withObservationTracking` inside swift-testing's
+  `confirmation(expectedCount:)`. `onChange` fires synchronously on the first `willSet` and only once per
+  registration, so `expectedCount: 0` proves that a rename or a resource of another type does not re-render.
+- **Verified.** Each of the four bump sites was disabled in turn and at least one test failed for each. Built and
+  tested in the `swift:6.2` and `swift:6.4` containers; SwiftLint 0.59.1 reports no new warnings.
 
 ## Implementation notes (2026-10-17, v1.6)
 
