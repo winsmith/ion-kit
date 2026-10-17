@@ -78,7 +78,7 @@ public final class MockHandler: RequestHandler {
 
     /// Queues a JSON:API document.
     public func respond(to key: String, document: JSONAPIDocument, status: Int = 200, headers: [String: String] = [:]) {
-        let data = try! document.encoded()
+        let data = fixtureEncoding(document) { try document.encoded() }
         var headers = headers
         if headers["Content-Type"] == nil { headers["Content-Type"] = JSONAPIDocument.mediaType }
         respond(to: key, with: RawResponse(status: status, headers: headers, data: data))
@@ -89,7 +89,7 @@ public final class MockHandler: RequestHandler {
         to key: String, with value: T, included: [ResourceObject] = [], links: Links? = nil,
         meta: [String: JSONValue]? = nil, status: Int = 200, headers: [String: String] = [:]
     ) {
-        let object = try! codec.encode(value)
+        let object = fixtureEncoding(value) { try codec.encode(value) }
         respond(to: key, document: JSONAPIDocument(one: object, included: included, links: links, meta: meta), status: status, headers: headers)
     }
 
@@ -98,7 +98,7 @@ public final class MockHandler: RequestHandler {
         to key: String, with values: [T], included: [ResourceObject] = [], links: Links? = nil,
         meta: [String: JSONValue]? = nil, status: Int = 200, headers: [String: String] = [:]
     ) {
-        let objects = values.map { try! codec.encode($0) }
+        let objects = values.map { value in fixtureEncoding(value) { try codec.encode(value) } }
         respond(to: key, document: JSONAPIDocument(many: objects, included: included, links: links, meta: meta), status: status, headers: headers)
     }
 

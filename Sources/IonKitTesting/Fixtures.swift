@@ -7,7 +7,7 @@ import IonKit
 public enum Fixtures {
     /// The resource object for a value, through the codec.
     public static func object<T: Resource>(_ value: T, codec: ResourceCodec = .default) -> ResourceObject {
-        try! codec.encode(value)
+        fixtureEncoding(value) { try codec.encode(value) }
     }
 
     /// Resource objects for values of one type.
@@ -43,6 +43,18 @@ extension Store {
     ///
     /// Usage: `store.seed([Person(id: "1", name: "Ann")])`
     public func seed<T: Resource>(_ values: [T]) {
-        upsert(JSONAPIDocument(many: values.map { try! codec.encode($0) }))
+        upsert(JSONAPIDocument(many: values.map { value in fixtureEncoding(value) { try codec.encode(value) } }))
+    }
+}
+
+/// Runs an encoding step for a test fixture and crashes with the error if it fails: a fixture that cannot be encoded
+/// is a bug in the test, not a condition to handle.
+///
+/// Usage: `fixtureEncoding(value) { try codec.encode(value) }`
+func fixtureEncoding<Result>(_ subject: Any, _ body: () throws -> Result) -> Result {
+    do {
+        return try body()
+    } catch {
+        fatalError("IonKitTesting could not encode fixture \(subject): \(error)")
     }
 }
