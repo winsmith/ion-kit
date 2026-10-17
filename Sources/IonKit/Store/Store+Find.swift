@@ -60,15 +60,15 @@ extension Store {
     /// Runs a request whose response is not a JSON:API document. Nothing is cached or upserted.
     public func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws -> Response {
         let raw = try RawRequest(request, baseURL: baseURL)
+        let sentAt = Date()
         let response: RawResponse
         do {
-            response = try await chain.perform(raw)
+            response = try await Store.exchange(raw, chain: chain)
+            record(nil, for: raw, sentAt: sentAt)
         } catch {
-            throw IonError(error)
-        }
-        guard response.isSuccess else {
-            let errors = (try? JSONAPIDocument.decode(response.data))?.errors ?? []
-            throw IonError.http(status: response.status, errors: errors)
+            let error = IonError(error)
+            record(error, for: raw, sentAt: sentAt)
+            throw error
         }
         do {
             return try codec.makeDecoder().decode(Response.self, from: response.data)

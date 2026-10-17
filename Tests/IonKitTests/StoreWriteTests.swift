@@ -168,6 +168,41 @@ struct StoreWriteTests {
         #expect(!ann.isDeleted)
     }
 
+    @Test func deleteAnswering404CountsAsDeleted() async throws {
+        mock.respond(to: "GET people", with: [Person(id: "1", name: "Ann"), Person(id: "2", name: "Bob")])
+        let collection = try await store.query(Person.self)
+        let ann = try #require(collection.items.first)
+        mock.respond(to: "DELETE people/1", status: 404, errors: [ErrorObject(status: "404", code: "not_found")])
+        mock.respond(to: "GET people", with: [Person(id: "2", name: "Bob")])
+        try await store.delete(ann)
+        #expect(ann.isDeleted, "already gone on the server")
+        #expect(collection.items.map(\.id) == ["2"])
+        try await eventually { mock.requests(for: "GET people").count == 2 }
+        #expect(mock.requests(for: "GET people").count == 2, "collection reloaded")
+    }
+
+    @Test func deleteFailingOtherwiseChangesNothing() async throws {
+        mock.respond(to: "GET people", with: [Person(id: "1", name: "Ann")])
+        let collection = try await store.query(Person.self)
+        let ann = try #require(collection.items.first)
+        mock.respond(to: "DELETE people/1", status: 500, errors: [])
+        await #expect(throws: IonError.self) { try await store.delete(ann) }
+        #expect(!ann.isDeleted)
+        #expect(collection.items.map(\.id) == ["1"])
+    }
+
+    @Test func aRetriedDeleteWhoseFirstAttemptLandedSucceeds() async throws {
+        let retry = RetryHandler(baseDelay: .milliseconds(1), methods: [.get, .delete], sleep: { _ in })
+        let store = Store(baseURL: MockHandler.defaultBaseURL, handlers: [retry, mock])
+        mock.respond(to: "GET people/1", with: Person(id: "1", name: "Ann"))
+        let ann = try await store.find(Person.self, id: "1")
+        mock.respond(to: "DELETE people/1", status: 503, errors: [])
+        mock.respond(to: "DELETE people/1", status: 404, errors: [])
+        try await store.delete(ann)
+        #expect(ann.isDeleted)
+        #expect(mock.requests(for: "DELETE people/1").count == 2)
+    }
+
     @Test func slowResponseStartedBeforeAMutationDoesNotRevertIt() async throws {
         let gate = GateHandler()
         let store = Store(baseURL: MockHandler.defaultBaseURL, handlers: [gate, mock])

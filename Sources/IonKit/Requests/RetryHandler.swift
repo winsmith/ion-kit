@@ -4,7 +4,8 @@ import FoundationNetworking
 #endif
 
 /// Retries idempotent requests after transient transport failures and retryable statuses, with exponential backoff
-/// and jitter. Only GETs are retried by default; a retried DELETE whose first attempt succeeded would answer 404.
+/// and jitter. Only GETs are retried by default. A DELETE is safe to retry too (`methods: [.get, .delete]`): when its
+/// first attempt landed, the retry answers 404, which `store.delete` counts as success.
 ///
 /// Put it first in the chain so that every attempt runs through the handlers after it (a fresh bearer token, one log
 /// line per attempt). Cancellation during a backoff pause propagates as usual.
