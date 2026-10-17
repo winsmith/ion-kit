@@ -60,6 +60,14 @@ throws. `catch IonError.cancelled` works everywhere. Once the toolchain allows i
 path. A minimal reproducer: a generic `func b<T: P>(_: T.Type) async throws(E) -> C<T>` called with
 `let c = try await s.b(X.self); _ = c.v` crashes `swiftc -Onone` 6.1.3.
 
+## Releasing
+
+Releases are git tags on `main` that follow semantic versioning (`1.3.0`; the first two were tagged `1.1` and
+`1.2`). A release pull request moves the "Current state of the code" heading and status in
+`docs/ARCHITECTURE.md` to the new version, ticks its milestone and adds an "Implementation notes" section. Once it
+is merged, the maintainer tags the merge commit (`git tag 1.3.0 <sha> && git push origin 1.3.0`). Consumers then
+raise their `from:` requirement and re-resolve; Village does that in its own pull request.
+
 ## Definition of done
 
 - `swift build` and `swift test` pass on macOS and in the `swift:6.1` container.

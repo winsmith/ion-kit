@@ -15,6 +15,15 @@ IonKit borrows [WarpDrive](https://warp-drive.io)'s layering (request chain → 
 JavaScript mechanics. The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the canonical source of
 truth for the package.
 
+## Installing
+
+```swift
+// Package.swift
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.3.0"),
+.target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
+.testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
+```
+
 ## Defining resources
 
 ```swift
@@ -135,18 +144,55 @@ let saved = try await store.save(&draft)     // PATCH people/42 with only the ch
 var fresh = Draft(new: Person(id: "", name: "New"))
 try await store.save(&fresh)                 // POST people; fresh.value.id is now the server's id
 
-try await store.delete(person)               // DELETE people/42; person.isDeleted == true
+try await store.delete(person)               // DELETE people/42; person.isDeleted == true (also when it answers 404)
 ```
 
 On success the response is upserted (the server's version wins), cached queries of the type are invalidated and
 alive collections reload. On failure nothing in the cache changes; `IonError.http(status: 422, errors:)` carries
-field-level messages via `errors(forAttribute: "name")` when the server sends `source.pointer`.
+field-level messages via `errors(forAttribute: "name")` when the server sends `source.pointer`. A DELETE answered
+with 404 counts as deleted (someone else deleted it first), so `RetryHandler(methods: [.get, .delete])` is safe.
+
+### Bulk saves with `batch`
+
+Every save reloads the alive collections of its type. When many saves happen in a row (an import, a bulk edit),
+wrap them in `batch` so each alive collection reloads once, when the batch ends:
+
+```swift
+try await store.batch {
+    for person in imported {
+        var draft = Draft(new: person)
+        try await store.save(&draft)                         // upserted at once; lists reload after the batch
+    }
+}
+```
+
+Inside the batch, caches update and deleted items leave lists at once, and a query sees the new data; only the
+reloads of alive collections wait. They also run when the closure throws. Saves made concurrently from a task group
+inside the closure belong to the batch.
 
 ## Errors
 
 Every store method throws `IonError` only: `.transport`, `.http(status:errors:)`, `.notFound`, `.decoding`,
 `.invalidDraft` and `.cancelled`. `error.localizedDescription` is phrased for people ("You appear to be offline."),
 `error.description` for logs.
+
+### Signing out on 401 and showing "offline"
+
+Some requests have no caller to catch their error: a background revalidation, the reload of a list after a save, a
+`Fetch` showing its own failure view. `store.onError` hears about every request that failed in transport or with an
+HTTP error, once per request (retries and shared GETs count once, `.cancelled` never), before any caller does.
+`store.lastTransportError` is observable and stays set until a later request reaches the server:
+
+```swift
+store.onError = { error, request in
+    // A sign-in endpoint answers 401 for a wrong code; that is not a reason to sign out.
+    if error.status == 401, !request.url.path.contains("/auth/") { account.signOut() }
+}
+
+if store.lastTransportError != nil { Label("Offline", systemImage: "wifi.slash") }
+```
+
+Make the handler idempotent: requests already in flight can still report a 401 after the sign-out.
 
 ## Testing
 
@@ -172,8 +218,10 @@ docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
 
 ## Status
 
-v0.1 (wire format), v0.2 (reads), v0.3 (writes) and v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
-`RetryHandler`, batched `resolve`) are implemented and tested against `MockHandler`. See the milestone list in
+v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
+`RetryHandler`, batched `resolve`), v1.2 (fixes) and v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
+as success) are implemented and tested against `MockHandler`. Releases are git tags; depend on
+`from: "1.3.0"`. See the milestone list in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License

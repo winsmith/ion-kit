@@ -5,8 +5,9 @@
 > This file is the canonical source of truth for IonKit's design. It started as a Claude Docs document on
 > 2026-10-15 and was moved into the repository, with the revisions listed under
 > [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
-> on 2026-10-16. Consumers of the library start at
-> [Current state of the code](#current-state-of-the-code-v11-2026-10-16). Change the code and this file in the same
+> on 2026-10-16, v1.2 (two fixes found in the Village app) and v1.3 (the request outcome observer, `batch` and
+> DELETE 404 as success) on 2026-10-17. Consumers of the library start at
+> [Current state of the code](#current-state-of-the-code-v13-2026-10-17). Change the code and this file in the same
 > pull request.
 
 ## Purpose and goals
@@ -170,7 +171,14 @@ public protocol RequestHandler: Sendable {
 public struct RawResponse: Sendable { public let status: Int; public let headers: [String: String]; public let data: Data }
 `
 
-`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`, which sends every request with `.reloadIgnoringLocalCacheData` so the store's request cache is the only HTTP cache (a session `URLCache` honouring `max-age` would answer the reload after a save with the pre-save response); each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`; v1.1 adds `RetryHandler`, which retries idempotent requests (GET by default) after transient transport failures (timeouts, lost or refused connections, DNS and TLS failures; not "offline", which should fail at once) and after 408 / 429 / 500 / 502 / 503 / 504, with exponential backoff and jitter capped at `maxDelay`, honoring `Retry-After` and giving up when it asks for longer than `maxDelay`. It goes first in the chain so every attempt runs through the handlers after it. A `401` surfaces as `IonError.http(status: 401, …)` and the app logs the user out; there is no token-refresh hook (no consumer needs one; decided 2026-10-16).
+`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`, which sends every request with `.reloadIgnoringLocalCacheData` so the store's request cache is the only HTTP cache (a session `URLCache` honouring `max-age` would answer the reload after a save with the pre-save response); each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`; v1.1 adds `RetryHandler`, which retries idempotent requests (GET by default) after transient transport failures (timeouts, lost or refused connections, DNS and TLS failures; not "offline", which should fail at once) and after 408 / 429 / 500 / 502 / 503 / 504, with exponential backoff and jitter capped at `maxDelay`, honoring `Retry-After` and giving up when it asks for longer than `maxDelay`. It goes first in the chain so every attempt runs through the handlers after it. A `401` surfaces as `IonError.http(status: 401, …)` to the caller and, since v1.3, through `store.onError`, which is where the app logs the user out; there is no token-refresh hook (no consumer needs one; decided 2026-10-16).
+
+**Observing outcomes (v1.3).** Errors reach the caller of each store method, but several requests have no caller that could react: a background revalidation of a stale `find`, the reload of an alive collection after a save, a `Fetch` that shows its own failure view. So the store reports the outcome of every request it sends in one place:
+
+- `store.onError: (@MainActor (IonError, RawRequest) -> Void)?` is called once per request that failed in the handler chain, with `.transport` or `.http` errors only, before the error reaches the caller (if there is one). A request counts once however many attempts `RetryHandler` made, and callers that share one in-flight GET count once. `.cancelled` is never reported, a response that did not decode is not reported (it is a client bug, not an outcome to react to), and the statuses the store accepts (a 304 to a GET, a 404 to a DELETE) are not errors. The `RawRequest` lets the app tell requests apart: a sign-in endpoint that answers 401 for a wrong code should not sign anyone out.
+- `store.lastTransportError: IonError?` is observable: the `.transport` error of the most recently *sent* request that has finished, cleared by any later-sent request that got an HTTP response of any status. A slow request sent before a newer one cannot override the newer one's outcome. Show "offline" while it is set; it clears on its own when the next request reaches the server.
+
+Typical wiring: `store.onError = { error, request in if error.status == 401, !request.url.path.contains("/auth/") { account.signOut() } }` and `if store.lastTransportError != nil { OfflineBadge() }`. The handler should be idempotent: after a sign-out, other requests that were already in flight may still report their 401.
 
 **Store builders (v1)**
 
@@ -181,7 +189,8 @@ public struct RawResponse: Sendable { public let status: Int; public let headers
 | `store.query(Person.self, filter: ["name": "Ann"], sort: ["-updatedAt"], page: ["size": "50"], include: [], cache:)` | `GET people?filter[name]=…`, `op: .query` | `LiveCollection<Person>`; returns after the first page is loaded (at once from cache); one instance per `RequestKey` |
 | `store.query(Person.self, path: "groups/3/members")` | GET on a custom path, `op: .query` | `LiveCollection<Person>` |
 | `store.save(&draft)` | `POST people` or `PATCH people/42`, `op: .create` / `.update`, `records: [key]` | `Live<Person>`; on success the draft's `original` becomes its `value` |
-| `store.delete(live)` | `DELETE people/42`, `op: .delete` | `Void`; `live.isDeleted = true` and the item leaves every collection at once |
+| `store.delete(live)` | `DELETE people/42`, `op: .delete` | `Void`; `live.isDeleted = true` and the item leaves every collection at once; a 404 counts as deleted (v1.3) |
+| `store.batch { … }` | no request of its own | the closure's result; reloads of alive collections wait until the outermost batch ends (v1.3) |
 | `store.resolve(person.value.tags)` | `GET tags/{id}` for each id not in the cache | `[Live<Tag>]`; `peek` first, then `find` the gaps |
 | `store.query(Person.self, request:)` | any GET request app code built | `LiveCollection<Person>`, registered under the request's key |
 | `store.request(customRequest)` | whatever was built | `Request<JSONAPIDocument>` goes through the cache step and is upserted like any other response; `Request<Other>` is decoded with the codec's `JSONDecoder` and touches no cache |
@@ -191,7 +200,7 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 **Pagination** follows JSON:API `links` only. `LiveCollection<T>` exposes `links` and `loadMore()`, which fetches `links.next` and appends its items. `reload()` refetches the first page and then follows the fresh `links.next` for as many pages as were loaded, and swaps the whole result in once (since v1.1; before, appended pages were dropped). A background reload after a mutation refetches the first page only and keeps the appended pages, so a save never costs one request per loaded page. Page size and strategy stay a server concern.
 
-**Errors** are one enum, and store methods are meant to use typed throws (`async throws(IonError)`; see [Implementation notes](#implementation-notes-2026-10-15) for why they say plain `throws` today and still throw only `IonError`): `.transport(URLError)`; `.http(status: Int, errors: [ErrorObject])` for 4xx/5xx with a parsed JSON:API `errors` array when present (`isNotFound` is a helper for 404); `.notFound(ResourceKey)` only when a `find` response carries `"data": null`; `.decoding(ResourceKey?, Error)`; `.invalidDraft(String)`; `.cancelled`, mapped from `CancellationError` and `URLError.cancelled` so a view that disappears mid-fetch never shows an error. An empty body or HTTP 204 decodes to an empty document and upserts nothing. `ErrorObject` keeps every member the spec defines (`id`, `status`, `code`, `title`, `detail`, `source.pointer` / `parameter` / `header`, `meta`, `links`); `IonError.http` offers `errors(forAttribute: "name")` and `errors(forRelationship: "group")`, which match on `source.pointer` when the server sends one (the spec makes it optional) and return an empty array otherwise, so forms degrade to showing `title`/`detail`.
+**Errors** are one enum, and store methods are meant to use typed throws (`async throws(IonError)`; see [Implementation notes](#implementation-notes-2026-10-15) for why they say plain `throws` today and still throw only `IonError`): `.transport(URLError)`; `.http(status: Int, errors: [ErrorObject])` for 4xx/5xx with a parsed JSON:API `errors` array when present (`isNotFound` is a helper for 404); `.notFound(ResourceKey)` only when a `find` response carries `"data": null`; `.decoding(ResourceKey?, Error)`; `.invalidDraft(String)`; `.cancelled`, mapped from `CancellationError` and `URLError.cancelled` so a view that disappears mid-fetch never shows an error. Every `.transport` and `.http` error is also passed to `store.onError` (v1.3, see Observing outcomes above), which is the one place to react to errors no caller sees. An empty body or HTTP 204 decodes to an empty document and upserts nothing. `ErrorObject` keeps every member the spec defines (`id`, `status`, `code`, `title`, `detail`, `source.pointer` / `parameter` / `header`, `meta`, `links`); `IonError.http` offers `errors(forAttribute: "name")` and `errors(forRelationship: "group")`, which match on `source.pointer` when the server sends one (the spec makes it optional) and return an empty array otherwise, so forms degrade to showing `title`/`detail`.
 
 **JSON:API coverage.** IonKit targets JSON:API 1.1 as a client; the table says what v1 does with each part of the spec so that an unfamiliar server works without changes to the package.
 
@@ -234,8 +243,10 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 | --- | --- | --- | --- |
 | `.create` | new entry + `Live<T>` from the response | every `.query` entry whose `types` contains the type: `invalidatedAt = now` | `reload()` if `autoRefresh` (the default) |
 | `.update` | upsert the response, bump `mutationSequence` | same (membership and order may have changed) | `reload()` if `autoRefresh` |
-| `.delete` | tombstone, bump `mutationSequence` | same | drop the item at once, then `reload()` if `autoRefresh` |
+| `.delete` (2xx, or 404 since v1.3) | tombstone, bump `mutationSequence` | same | drop the item at once, then `reload()` if `autoRefresh` |
 | custom `request` | upsert any resources in the response | nothing unless `cache.types` is set on the request | nothing |
+
+**Batches (v1.3).** `store.batch { … }` defers the last column of this table. Saves and deletes inside the closure update the resource cache and the request cache at once, exactly as above, and a delete still drops its item from every list at once; only the reloads of alive collections wait. When the outermost batch ends, normally or by throwing, every alive collection of each type that was invalidated reloads once, if its `autoRefresh` is on at that moment. A query made inside the batch sees the invalidation and fetches. The batch is store-wide, not task-local: concurrent saves from a task group inside the closure belong to it, and so does a mutation from another screen while it runs; an unstructured task that outlives the closure does not. `clear()` drops the pending reloads. Use it wherever many mutations happen in a row (an import, a bulk edit), instead of turning `autoRefresh` off on whichever collection is on screen and reloading by hand.
 
 The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`. `clear()` resets every alive collection to `.idle` with no items and cancels a reload it may be running, so a logout mid-reload cannot bring old data back.
 
@@ -358,7 +369,7 @@ The diff is computed by encoding `value` and `original` with the codec to `JSONV
 
 **Concurrent edits.** Two drafts of the same resource can exist in one app, or another device may save first; the last `save` wins and the live instance always shows the last server response. A form can call `draft.isStale(against: live)` before saving to warn the user. v2 can add an optional `version` attribute check if Village needs it.
 
-**Delete.** `store.delete(live)` sends `DELETE`, then tombstones the entry, flags `live.isDeleted`, removes the item from every alive collection of that type and invalidates their cache entries. Views holding the instance should dismiss on `isDeleted`.
+**Delete.** `store.delete(live)` sends `DELETE`, then tombstones the entry, flags `live.isDeleted`, removes the item from every alive collection of that type and invalidates their cache entries. Views holding the instance should dismiss on `isDeleted`. A 404 means the resource is already gone, deleted on another device or by an earlier attempt of the same DELETE, and is handled exactly like a 2xx (v1.3); every other failure throws and changes nothing. That makes a DELETE safe to retry: `RetryHandler(methods: [.get, .delete])`.
 
 **What is deliberately missing in v1:** optimistic updates (show the edit before the server answers), rollback of a saved change, dirty-tracking on the live instance, and an offline write queue. Each would move local state into the cache, which is exactly the complexity the Draft model avoids.
 
@@ -415,6 +426,9 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Default cache policy soft 1 min / hard 24 h, honoring `Cache-Control` / `Expires`, configurable per store and request | Village sets `Cache-Control`; a single-user app can keep data for a day and revalidate in the background |
 | Field-level validation errors only when `source.pointer` is present | The spec makes `source` optional; forms fall back to `title` / `detail` |
 | No token-refresh hook in v1; a 401 logs the user out | Email-code login issues long-lived tokens; refresh can be a handler later |
+| Outcomes are reported through one optional closure, `store.onError(error, request)`, plus an observable `lastTransportError`; once per request, never `.cancelled`, never for accepted statuses (2026-10-17, v1.3) | A 401 from a background revalidation or a `Fetch` had no caller to sign out from; a closure keeps the store free of a delegate protocol, and the request lets apps exempt auth endpoints. The latest-sent request decides "offline", the same rule the request cache uses |
+| `batch` defers only the reloads of alive collections, is store-wide (a depth counter on the main actor, not a task-local) and flushes on throw (2026-10-17, v1.3, [#11](https://github.com/winsmith/ion-kit/issues/11)) | Staleness must stay immediate so a query inside the batch never sees pre-save data; a task-local would miss saves made from task-group children |
+| A DELETE answered with 404 counts as deleted (2026-10-17, v1.3) | JSON:API says a server SHOULD answer 404 for a missing resource; the outcome the user wanted holds, and a retried DELETE becomes safe. A routing bug that answers 404 would also "succeed"; accepted |
 | Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence is a v3 feature with a clear seam (`CacheSnapshot`) |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
@@ -423,7 +437,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | ETags live on documents, not resources: `If-None-Match` on GETs, no `If-Match` on writes (2026-10-16) | The request cache is where revalidation pays off; Village sends no ETag at all and decided against version checks |
 | A 304 validates a document as of the moment the request was sent, and no caller joins an in-flight GET from before the last invalidation or mutation (2026-10-16) | Otherwise a reload after a save could mark pre-save data fresh |
 | `reload()` refetches every loaded page and swaps the result in once; mutation-driven background reloads refetch page 1 only; concurrent reloads coalesce (2026-10-16) | No reshuffling list under a refresh spinner, and a save does not cost one request per loaded page per alive list |
-| `RetryHandler` retries GET only by default, transient transport errors only, never past `Retry-After > maxDelay` (2026-10-16) | A retried DELETE answers 404; "offline" should fail at once; a long `Retry-After` under a spinner is worse than the error |
+| `RetryHandler` retries GET only by default, transient transport errors only, never past `Retry-After > maxDelay` (2026-10-16) | Writes are not idempotent (DELETE is since v1.3, which treats a 404 as success; opt in with `methods: [.get, .delete]`); "offline" should fail at once; a long `Retry-After` under a spinner is worse than the error |
 | `Fetch` is one view for resources and collections, takes the store from the environment or `store:`, passes `retry` to the failure closure, no phase-closure variant (2026-10-16) | A phase closure would be ambiguous with the content-only form under trailing-closure syntax; a failure view without retry is useless in practice |
 | `Fetch` ships inside the `IonKit` target behind `#if canImport(SwiftUI)` rather than as a separate product (2026-10-16) | One import for apps; the cost is SwiftUI linked into macOS command-line consumers, accepted |
 | `resolve` batching is opt-in (`ResolveStrategy.oneByOne` default) and falls back when the server ignores the filter (2026-10-16) | `filter[id]` is a JSON:API recommendation, not a requirement; Village has no filters before its M10 |
@@ -441,7 +455,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v2["v2 Depth"] --> v3["v3 Persistence"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v2["v2 Depth"] --> v3["v3 Persistence"]
     style v03 stroke-width:3px
 ```
 
@@ -474,9 +488,18 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] `RetryHandler` with backoff, jitter and `Retry-After`, GET only by default; `MockHandler.respond(to:throwing:)`.
 - [x] `resolve` via one `filter[id]` query per batch (`ResolveStrategy.batched`, opt-in).
 - [x] POST queries with explicit keys and a token-refresh handler: not needed (open questions answered "no").
-- [ ] Village adopts `Fetch` on its person and list screens and `RetryHandler` in its chain (the gate for calling v1.1 done).
+- [x] Village adopts `Fetch` on its person and list screens and `RetryHandler` in its chain (the gate for calling v1.1 done; Village PR 3, 2026-10-16).
 
-Separate PRs, not part of this milestone: batch mutations that reload alive collections once ([issue #11](https://github.com/winsmith/ion-kit/issues/11)); cache persistence ([issue #10](https://github.com/winsmith/ion-kit/issues/10), v3); typed throws ([issue #1](https://github.com/winsmith/ion-kit/issues/1), needs the Swift 6.2 decision).
+**v1.2 — Fixes from the Village app** — done 2026-10-17: `URLSessionHandler` bypasses `URLCache`; `Fetch` keeps its load alive across a spurious `onDisappear` (see the v1.1 implementation notes).
+
+**v1.3 — Outcomes and batches** (what Village's MVP needed next) — package side done 2026-10-17
+
+- [x] `store.onError(error, request)` and the observable `store.lastTransportError`, reported once per request from every path (foreground, background revalidation, collection reloads, `Fetch`, non-document requests).
+- [x] `store.batch { }`: alive collections reload once per batch instead of once per save ([issue #11](https://github.com/winsmith/ion-kit/issues/11)).
+- [x] `delete` treats a 404 as success.
+- [ ] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate).
+
+Separate PRs, not part of these milestones: cache persistence ([issue #10](https://github.com/winsmith/ion-kit/issues/10), v3); typed throws ([issue #1](https://github.com/winsmith/ion-kit/issues/1), needs the Swift 6.2 decision).
 
 **v2 — Depth**: `related(\.key)` observable relationship resolution; LRU eviction with a size cap; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
@@ -527,15 +550,16 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v1.1, 2026-10-16)
+## Current state of the code (v1.3, 2026-10-17)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as of the v1.1 pull request on 2026-10-16; update it
+signatures are, and what to rely on. It describes the package as of the v1.3 pull request on 2026-10-17; update it
 in the same pull request as any public API change.
 
-**Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes) and v1.1 (ergonomics: `Fetch`, multi-page reload,
-ETag / 304, `RetryHandler`, batched `resolve`) are implemented in `Sources/IonKit` (about 3,300 lines) with
-`Sources/IonKitTesting` (about 220 lines) and about 80 swift-testing tests that pass on macOS 15 (Xcode 16.3) and in
+**Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page reload,
+ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes) and v1.3 (`onError`, `lastTransportError`, `batch`,
+DELETE 404 as success) are implemented in `Sources/IonKit` (about 3,400 lines) with
+`Sources/IonKitTesting` (about 220 lines) and about 100 swift-testing tests that pass on macOS 15 (Xcode 16.3) and in
 the `swift:6.1` and `swift:6.2` containers. Nothing on the v2 / v3 lists exists yet. There is no sample app and the
 fixtures are synthetic.
 
@@ -543,14 +567,15 @@ fixtures are synthetic.
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", branch: "main"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.3.0"),
 …
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
 Platforms: macOS 15, iOS 18, Linux (Swift 6.1+). Swift 6 language mode with strict concurrency; Foundation only.
-No tags or releases exist yet; depend on `main` or a commit.
+Releases are git tags (`1.1`, `1.2`, `1.3.0`, …) following semantic versioning; depend on a version range
+(`from:`) rather than `main`. A release is cut by merging its pull request and tagging the merge commit on `main`.
 
 **Behaviors to rely on.**
 
@@ -577,6 +602,13 @@ No tags or releases exist yet; depend on `main` or a commit.
 - `Fetch` (SwiftUI only) renders loading / content / failure for a `find` or `query`, needs a `Store` in the
   environment or as `store:`, shows cached values synchronously and loads again when its request or store changes.
   Its load is cancelled when the request, store or retry attempt changes, not when the view disappears.
+- `store.onError` hears about every request that failed with `.transport` or `.http`, once per request and
+  before the caller does, including background revalidations, collection reloads and `Fetch`; never `.cancelled`,
+  a 304 to a GET or a 404 to a DELETE. `store.lastTransportError` is set by the latest-sent request that failed in
+  transport and cleared by the next one that reached the server.
+- Inside `store.batch { }`, mutations update caches and lists at once but alive collections reload only when the
+  outermost batch ends, once per collection, also when the closure throws.
+- `delete` succeeds on 404: the resource is tombstoned and leaves every list as for a 2xx.
 - `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
@@ -795,6 +827,8 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
 @MainActor @Observable public final class Store {
     let baseURL: URL; let codec: ResourceCodec; var cachePolicy: any CachePolicy
     var resolveStrategy: ResolveStrategy                          // v1.1; default .oneByOne
+    var onError: (@MainActor (IonError, RawRequest) -> Void)?     // v1.3; once per failed request, never .cancelled
+    private(set) var lastTransportError: IonError?                // v1.3; observable, latest-sent request wins
     init(baseURL: URL, handlers: [any RequestHandler] = [URLSessionHandler()],
          codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy())
 
@@ -817,10 +851,11 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
 
     // writes
     @discardableResult func save<T: Resource>(_ draft: inout Draft<T>) async throws -> Live<T>
-    func delete<T: Resource>(_ live: Live<T>) async throws
+    func delete<T: Resource>(_ live: Live<T>) async throws          // a 404 counts as deleted (v1.3)
+    func batch<R>(_ body: @MainActor () async throws -> R) async rethrows -> R   // v1.3; reload alive collections once
 
     // cache control
-    func invalidate(type: String)                                 // expire queries of the type, reload alive collections
+    func invalidate(type: String)                                 // expire queries of the type, reload alive collections (after a batch)
     func invalidate(key: ResourceKey)                             // expire documents whose primary data lists the key
     func clear()                                                  // logout
     func upsert(_ document: JSONAPIDocument)                      // push payloads, seeds; no request
@@ -908,9 +943,25 @@ extension Store { func seed<T: Resource>(_ values: [T]) }
 ```
 
 **Not there yet** (so do not code against it): `related(\.key)`, token refresh, POST queries served from the cache,
-batch mutations ([#11](https://github.com/winsmith/ion-kit/issues/11)), eviction, persistence, client-generated
+a batched request format (`batch` coalesces reloads; each save is still its own request), eviction, persistence, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-17, v1.3)
+
+- **One place for outcomes.** Every request leaves through `Store.exchange`, which runs the handler chain and maps
+  statuses; `send` (mutations, the 304 refetch) and the owner of a shared GET report the result through
+  `record(_:for:sentAt:)`. Callers that join an in-flight GET do not report, so a failure seen by three views is
+  one `onError` call. `request<Response>` uses the same path, which removed its copy of the status mapping.
+- **Why a closure and not a handler.** A `RequestHandler` sees every attempt (it sits inside or outside
+  `RetryHandler`) and cannot tell a cancelled caller from a failed request; the store can, and it is where
+  "offline" has to be decided relative to other requests.
+- **`batch` takes a `@MainActor` closure.** A plain async closure would need `sending` and a `Sendable` result
+  on Swift 6.0/6.1; on the main actor the result passes through as is.
+- **Compiler note.** A test that creates drafts inside `group.addTask { @MainActor in … }` within a
+  `@MainActor` test crashes Swift's region-based isolation checker ("pattern that the region-based isolation
+  checker does not understand"); calling a `static` helper that owns the `var draft` compiles. Village's importer
+  uses the same shape.
 
 ## Implementation notes (2026-10-16, v1.1)
 

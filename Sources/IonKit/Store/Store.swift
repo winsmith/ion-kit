@@ -20,6 +20,16 @@ public final class Store {
     /// How `resolve(_ relationship: ToMany)` fetches ids that are not cached. Default: one `find` per id.
     /// Usage: `store.resolveStrategy = .batched()` for a server that supports `filter[id]=1,2,3`.
     @ObservationIgnored public var resolveStrategy: ResolveStrategy = .oneByOne
+    /// Called once per request that failed in the handler chain: a transport error or a non-2xx status the store
+    /// does not accept (a 304 to a GET and a 404 to a DELETE are accepted). Covers every request the store sends,
+    /// background revalidations and `Fetch` included; never `.cancelled`; the attempts of `RetryHandler` count as
+    /// one, and callers sharing an in-flight GET as one. Runs before the error reaches the caller.
+    /// Usage: `store.onError = { error, _ in if error.status == 401 { account.signOut() } }`
+    @ObservationIgnored public var onError: (@MainActor (IonError, RawRequest) -> Void)?
+    /// The transport error of the most recently sent request that finished, or nil once a request sent later got
+    /// any HTTP response. Observable, so an "offline" badge can follow it.
+    /// Usage: `if store.lastTransportError != nil { OfflineBadge() }`
+    public private(set) var lastTransportError: IonError?
 
     @ObservationIgnored let chain: HandlerChain
     @ObservationIgnored let resources = ResourceCache()
@@ -28,6 +38,11 @@ public final class Store {
     @ObservationIgnored var collections: [RequestKey: WeakCollection] = [:]
     /// Incremented on every successful local mutation; entries remember the value at their last mutation.
     @ObservationIgnored var mutationCounter = 0
+    /// When the request that last set or cleared `lastTransportError` was sent; an older one cannot override it.
+    @ObservationIgnored private var lastOutcomeSentAt = Date.distantPast
+    /// Open `batch` calls; while above zero, `invalidate(type:)` defers collection reloads.
+    @ObservationIgnored private var batchDepth = 0
+    @ObservationIgnored private var deferredReloadTypes: Set<String> = []
 
     /// - Parameters:
     ///   - baseURL: resolved against relative request paths.
@@ -49,9 +64,41 @@ public final class Store {
     // MARK: Cache control
 
     /// Marks every cached query of the type expired and reloads alive collections of it (when `autoRefresh`).
-    /// Call after a push notification, say.
+    /// Inside `batch` the reload waits for the batch to end. Call after a push notification, say.
     public func invalidate(type: String) {
         requests.invalidate(type: type)
+        guard batchDepth == 0 else {
+            deferredReloadTypes.insert(type)
+            return
+        }
+        reloadAliveCollections(ofType: type)
+    }
+
+    /// Runs `body` and reloads each alive collection it made stale once, when the outermost batch ends (also when
+    /// `body` throws), instead of once per save. Saves and deletes inside still upsert, tombstone, drop deleted
+    /// items from lists and mark cached queries stale at once; only the reloads of alive collections wait, and
+    /// `autoRefresh` is read when they run. The batch is store-wide: a mutation from another screen while it runs
+    /// waits too. Concurrent saves inside `body` (a task group) are fine as long as `body` awaits them.
+    ///
+    /// Usage: `try await store.batch { for row in rows { var draft = Draft(new: row); try await store.save(&draft) } }`
+    public func batch<R>(_ body: @MainActor () async throws -> R) async rethrows -> R {
+        batchDepth += 1
+        defer {
+            batchDepth -= 1
+            if batchDepth == 0 { flushDeferredReloads() }
+        }
+        return try await body()
+    }
+
+    private func flushDeferredReloads() {
+        let types = deferredReloadTypes.sorted()
+        deferredReloadTypes = []
+        for type in types {
+            reloadAliveCollections(ofType: type)
+        }
+    }
+
+    private func reloadAliveCollections(ofType type: String) {
         for collection in aliveCollections(ofType: type) where collection.autoRefresh {
             collection.reloadInBackground()
         }
@@ -67,6 +114,7 @@ public final class Store {
     public func clear() {
         resources.removeAll()
         requests.removeAll()
+        deferredReloadTypes = []
         for collection in aliveCollections(ofType: nil) {
             collection.reset()
         }
@@ -147,16 +195,15 @@ public final class Store {
             defer { if owned, inflight[key]?.task == flight.task { inflight[key] = nil } }
             do {
                 fetched = try await flight.task.value
+                if owned { record(nil, for: raw, sentAt: flight.startedAt) }
             } catch {
-                throw IonError(error)
+                let error = IonError(error)
+                if owned { record(error, for: raw, sentAt: flight.startedAt) }
+                throw error
             }
             if Task.isCancelled { throw IonError.cancelled }
         } else {
-            do {
-                fetched = try await Store.perform(raw, chain: chain)
-            } catch {
-                throw IonError(error)
-            }
+            fetched = try await send(raw)
         }
         if fetched.response.status == 304 {
             if let entry = requests[key] {
@@ -167,11 +214,7 @@ public final class Store {
             // Nothing left to revalidate (cleared mid-flight, or a server answering 304 unprompted): fetch outright.
             var unconditional = raw
             unconditional.headers = unconditional.headers.filter { $0.key.lowercased() != "if-none-match" }
-            do {
-                fetched = try await Store.perform(unconditional, chain: chain)
-            } catch {
-                throw IonError(error)
-            }
+            fetched = try await send(unconditional)
             guard fetched.response.status != 304 else { throw IonError.http(status: 304, errors: []) }
         }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
@@ -219,22 +262,67 @@ public final class Store {
         return cached
     }
 
-    /// Runs the handler chain and decodes the wire document. Nonisolated, so it leaves the main actor.
-    /// A 304 to a GET comes back as an empty document with the response attached; every other non-2xx throws.
-    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain, sentAt: Date = Date()) async throws -> Fetched {
+    // MARK: Outcomes
+
+    /// `perform` with the outcome reported to `onError` and `lastTransportError`; for requests no other caller shares.
+    func send(_ raw: RawRequest, accepting: Set<Int> = []) async throws -> Fetched {
+        let sentAt = Date()
+        do {
+            let fetched = try await Store.perform(raw, chain: chain, sentAt: sentAt, accepting: accepting)
+            record(nil, for: raw, sentAt: sentAt)
+            return fetched
+        } catch {
+            let error = IonError(error)
+            record(error, for: raw, sentAt: sentAt)
+            throw error
+        }
+    }
+
+    /// Updates `lastTransportError` (the latest-sent request wins) and calls `onError` for transport and HTTP
+    /// errors. A cancelled request reports nothing; a response that did not decode still proves the server answered.
+    func record(_ error: IonError?, for raw: RawRequest, sentAt: Date) {
+        if case .cancelled? = error { return }
+        if sentAt >= lastOutcomeSentAt {
+            lastOutcomeSentAt = sentAt
+            if case .transport? = error {
+                lastTransportError = error
+            } else if lastTransportError != nil {
+                lastTransportError = nil
+            }
+        }
+        guard let error else { return }
+        switch error {
+        case .transport, .http:
+            onError?(error, raw)
+        default:
+            break
+        }
+    }
+
+    /// Runs the handler chain and maps a status outside 2xx and `accepting` to `IonError.http`. Nonisolated.
+    nonisolated static func exchange(_ raw: RawRequest, chain: HandlerChain, accepting: Set<Int> = []) async throws -> RawResponse {
         let response: RawResponse
         do {
             response = try await chain.perform(raw)
         } catch {
             throw IonError(error)
         }
-        let receivedAt = Date()
-        if response.status == 304, raw.method == .get {
-            return Fetched(document: JSONAPIDocument(), response: response, receivedAt: receivedAt, sentAt: sentAt)
-        }
-        guard response.isSuccess else {
+        guard response.isSuccess || accepting.contains(response.status) else {
             let errors = (try? JSONAPIDocument.decode(response.data))?.errors ?? []
             throw IonError.http(status: response.status, errors: errors)
+        }
+        return response
+    }
+
+    /// Runs the handler chain and decodes the wire document. Nonisolated, so it leaves the main actor.
+    /// A 304 to a GET, and any status in `accepting`, comes back as an empty document with the response attached;
+    /// every other non-2xx throws.
+    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain, sentAt: Date = Date(), accepting: Set<Int> = []) async throws -> Fetched {
+        let accepted = raw.method == .get ? accepting.union([304]) : accepting
+        let response = try await exchange(raw, chain: chain, accepting: accepted)
+        let receivedAt = Date()
+        if !response.isSuccess {
+            return Fetched(document: JSONAPIDocument(), response: response, receivedAt: receivedAt, sentAt: sentAt)
         }
         do {
             return Fetched(document: try JSONAPIDocument.decode(response.data), response: response, receivedAt: receivedAt, sentAt: sentAt)

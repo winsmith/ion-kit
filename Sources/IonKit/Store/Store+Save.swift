@@ -36,7 +36,7 @@ extension Store {
         }
 
         let raw = try RawRequest(request, baseURL: baseURL)
-        let fetched = try await Store.perform(raw, chain: chain)
+        let fetched = try await send(raw)
 
         var primary = fetched.document.data?.objects.first
         if primary == nil {
@@ -66,6 +66,8 @@ extension Store {
 
     /// Sends DELETE, tombstones the entry, flags `live.isDeleted`, removes the item from every alive collection of
     /// the type at once and invalidates cached queries of it. Views holding the instance should dismiss on `isDeleted`.
+    /// A 404 means the resource is already gone (deleted on another device, or a retried DELETE whose first attempt
+    /// landed) and counts as success.
     ///
     /// Usage: `try await store.delete(live)`
     public func delete<T: Resource>(_ live: Live<T>) async throws {
@@ -75,7 +77,7 @@ extension Store {
             cache: CacheOptions(types: [T.resourceType])
         )
         let raw = try RawRequest(request, baseURL: baseURL)
-        let fetched = try await Store.perform(raw, chain: chain)
+        let fetched = try await send(raw, accepting: [404])
 
         mutationCounter += 1
         let sequence = mutationCounter
