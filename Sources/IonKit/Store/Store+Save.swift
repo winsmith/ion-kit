@@ -10,11 +10,11 @@ extension Store {
     ///
     /// Usage: `let live = try await store.save(&draft)`
     @discardableResult
-    public func save<T: Resource>(_ draft: inout Draft<T>) async throws -> Live<T> {
+    public func save<T: Resource>(_ draft: inout Draft<T>) async throws(IonError) -> Live<T> {
         let request: Request<JSONAPIDocument>
         if let original = draft.original {
             guard draft.value.id == original.id else {
-                throw IonError.invalidDraft("the id of \(T.resourceType)/\(original.id) was changed to \(draft.value.id)")
+                throw .invalidDraft("the id of \(T.resourceType)/\(original.id) was changed to \(draft.value.id)")
             }
             let diff = try codec.diff(from: original, to: draft.value)
             if ResourceCodec.isEmptyChange(diff) {
@@ -42,14 +42,14 @@ extension Store {
         if primary == nil {
             // HTTP 204 or an empty body: the server accepted the resource as sent.
             guard !draft.isNew else {
-                throw IonError.decoding(nil, CodecError.missingID(type: T.resourceType))
+                throw .decoding(nil, CodecError.missingID(type: T.resourceType))
             }
             primary = try codec.encode(draft.value)
         }
         guard let object = primary, let key = object.key else {
-            throw IonError.decoding(nil, CodecError.missingID(type: T.resourceType))
+            throw .decoding(nil, CodecError.missingID(type: T.resourceType))
         }
-        let value: T = try codec.decodeUntyped(object)
+        let value: T = try codec.decode(object)
 
         mutationCounter += 1
         let sequence = mutationCounter
@@ -70,7 +70,7 @@ extension Store {
     /// landed) and counts as success.
     ///
     /// Usage: `try await store.delete(live)`
-    public func delete<T: Resource>(_ live: Live<T>) async throws {
+    public func delete<T: Resource>(_ live: Live<T>) async throws(IonError) {
         let key = live.key
         let request = Request<JSONAPIDocument>(
             method: .delete, path: "\(T.collectionPath)/\(key.id)", op: .delete, records: [key],
@@ -93,24 +93,21 @@ extension Store {
 
     // MARK: Helpers
 
-    private func encodeBody(_ object: ResourceObject) throws -> Data {
-        try JSONAPIDocument(one: object).encoded()
+    private func encodeBody(_ object: ResourceObject) throws(IonError) -> Data {
+        do {
+            return try JSONAPIDocument(one: object).encoded()
+        } catch {
+            throw .decoding(object.key, error)
+        }
     }
 
     /// The live instance for an unchanged draft: the cached one, or one created from the draft's value.
-    private func existingLive<T: Resource>(for value: T) throws -> Live<T> {
+    private func existingLive<T: Resource>(for value: T) throws(IonError) -> Live<T> {
         let key = value.resourceKey
         if let live = try resources.live(for: key, as: T.self, codec: codec) {
             return live
         }
         resources.upsert(try codec.encode(value), typed: value, codec: codec, startSequence: mutationCounter)
         return try liveResource(for: key, as: T.self)
-    }
-}
-
-extension ResourceCodec {
-    /// `decode` with plain `throws`, for generic async callers (see `ResourceCache.live`).
-    func decodeUntyped<T: Resource>(_ object: ResourceObject) throws -> T {
-        try decode(object)
     }
 }

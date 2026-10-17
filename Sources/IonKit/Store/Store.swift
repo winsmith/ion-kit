@@ -6,9 +6,8 @@ import Observation
 /// Views call the store; the store runs requests through the handler chain off the main actor; responses are
 /// upserted into the resource cache; the cache updates the `Live` instances views observe.
 ///
-/// Every throwing method of the store and its collections throws `IonError` only, so
-/// `catch IonError.cancelled { }` is exhaustive in practice. The signatures say plain `throws` because Swift 6.1
-/// crashes at -Onone on typed throws from generic async functions whose result depends on `T` (see CLAUDE.md).
+/// Every throwing method of the store and its collections uses typed throws (`throws(IonError)`), so a caller
+/// writes `catch .cancelled { }` and `catch .http(let status, _)` without casting.
 ///
 /// Usage: `let store = Store(baseURL: url, handlers: [BearerTokenHandler { token }, URLSessionHandler()])`
 @MainActor @Observable
@@ -149,8 +148,8 @@ public final class Store {
 
     // MARK: Fetch pipeline
 
-    /// A GET's cache step followed, when needed, by a fetch. Returns the keys of the result. Throws `IonError` only.
-    func load<T: Resource>(_ request: Request<JSONAPIDocument>, as type: T.Type) async throws -> CachedDocument {
+    /// A GET's cache step followed, when needed, by a fetch. Returns the keys of the result.
+    func load<T: Resource>(_ request: Request<JSONAPIDocument>, as type: T.Type) async throws(IonError) -> CachedDocument {
         let raw = try RawRequest(request, baseURL: baseURL)
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
         if request.method == .get, !request.cache.reload, let entry = usableEntry(for: key, as: T.self) {
@@ -195,7 +194,7 @@ public final class Store {
     }
 
     /// `load` without typed primaries.
-    func load(_ request: Request<JSONAPIDocument>) async throws -> CachedDocument {
+    func load(_ request: Request<JSONAPIDocument>) async throws(IonError) -> CachedDocument {
         try await load(request, as: NoResource.self)
     }
 
@@ -211,7 +210,7 @@ public final class Store {
     /// without touching any resource. A caller joins an in-flight GET only when that request started after the
     /// key's last invalidation and no mutation succeeded since, so a load after a save never adopts a response the
     /// server produced before the save.
-    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw original: RawRequest, key: RequestKey, as type: T.Type) async throws -> CachedDocument {
+    func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw original: RawRequest, key: RequestKey, as type: T.Type) async throws(IonError) -> CachedDocument {
         let startSequence = mutationCounter
         var raw = original
         if request.method == .get, let etag = requests[key]?.etag, !raw.hasHeader("If-None-Match") {
@@ -233,7 +232,7 @@ public final class Store {
             var unconditional = raw
             unconditional.headers = unconditional.headers.filter { $0.key.lowercased() != "if-none-match" }
             fetched = try await send(unconditional)
-            guard fetched.response.status != 304 else { throw IonError.http(status: 304, errors: []) }
+            guard fetched.response.status != 304 else { throw .http(status: 304, errors: []) }
         }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
         return ingest(fetched, typed: typed, request: request, key: key, startSequence: startSequence)
@@ -241,7 +240,7 @@ public final class Store {
 
     /// Sends a GET, or joins the in-flight one for the key when `canJoin` allows it. Only the caller that started
     /// the request records its outcome and removes it from `inflight`.
-    private func sharedGET(_ raw: RawRequest, key: RequestKey, startSequence: Int) async throws -> Fetched {
+    private func sharedGET(_ raw: RawRequest, key: RequestKey, startSequence: Int) async throws(IonError) -> Fetched {
         let flight: InFlight
         var owned = false
         if let existing = inflight[key], canJoin(existing, key: key) {
@@ -260,11 +259,11 @@ public final class Store {
             fetched = try await flight.task.value
             if owned { record(nil, for: raw, sentAt: flight.startedAt) }
         } catch {
-            let error = IonError(error)
+            let error = IonError(error)   // `Task` has no typed failure; `perform` only throws `IonError`
             if owned { record(error, for: raw, sentAt: flight.startedAt) }
             throw error
         }
-        if Task.isCancelled { throw IonError.cancelled }
+        if Task.isCancelled { throw .cancelled }
         return fetched
     }
 
@@ -312,14 +311,13 @@ public final class Store {
     // MARK: Outcomes
 
     /// `perform` with the outcome reported to `onError` and `lastTransportError`; for requests no other caller shares.
-    func send(_ raw: RawRequest, accepting: Set<Int> = []) async throws -> Fetched {
+    func send(_ raw: RawRequest, accepting: Set<Int> = []) async throws(IonError) -> Fetched {
         let sentAt = Date()
         do {
             let fetched = try await Store.perform(raw, chain: chain, sentAt: sentAt, accepting: accepting)
             record(nil, for: raw, sentAt: sentAt)
             return fetched
         } catch {
-            let error = IonError(error)
             record(error, for: raw, sentAt: sentAt)
             throw error
         }
@@ -347,7 +345,7 @@ public final class Store {
     }
 
     /// Runs the handler chain and maps a status outside 2xx and `accepting` to `IonError.http`. Nonisolated.
-    nonisolated static func exchange(_ raw: RawRequest, chain: HandlerChain, accepting: Set<Int> = []) async throws -> RawResponse {
+    nonisolated static func exchange(_ raw: RawRequest, chain: HandlerChain, accepting: Set<Int> = []) async throws(IonError) -> RawResponse {
         let response: RawResponse
         do {
             response = try await chain.perform(raw)
@@ -356,7 +354,7 @@ public final class Store {
         }
         guard response.isSuccess || accepting.contains(response.status) else {
             let errors = (try? JSONAPIDocument.decode(response.data))?.errors ?? []
-            throw IonError.http(status: response.status, errors: errors)
+            throw .http(status: response.status, errors: errors)
         }
         return response
     }
@@ -364,7 +362,7 @@ public final class Store {
     /// Runs the handler chain and decodes the wire document. Nonisolated, so it leaves the main actor.
     /// A 304 to a GET, and any status in `accepting`, comes back as an empty document with the response attached;
     /// every other non-2xx throws.
-    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain, sentAt: Date = Date(), accepting: Set<Int> = []) async throws -> Fetched {
+    nonisolated static func perform(_ raw: RawRequest, chain: HandlerChain, sentAt: Date = Date(), accepting: Set<Int> = []) async throws(IonError) -> Fetched {
         let accepted = raw.method == .get ? accepting.union([304]) : accepting
         let response = try await exchange(raw, chain: chain, accepting: accepted)
         let receivedAt = Date()
@@ -374,14 +372,12 @@ public final class Store {
         do {
             return Fetched(document: try JSONAPIDocument.decode(response.data), response: response, receivedAt: receivedAt, sentAt: sentAt)
         } catch {
-            throw IonError.decoding(nil, error)
+            throw .decoding(nil, error)
         }
     }
 
     /// Decodes the primary objects as `T`, failing the request when one does not decode.
-    ///
-    /// Plain `throws` on purpose (see `ResourceCache.live`); the caller converts to `IonError`.
-    nonisolated static func decodePrimaries<T: Resource>(of document: JSONAPIDocument, as type: T.Type, codec: ResourceCodec) async throws -> [ResourceKey: T] {
+    nonisolated static func decodePrimaries<T: Resource>(of document: JSONAPIDocument, as type: T.Type, codec: ResourceCodec) async throws(IonError) -> [ResourceKey: T] {
         guard T.self != NoResource.self else { return [:] }
         var typed: [ResourceKey: T] = [:]
         for object in document.data?.objects ?? [] {
@@ -400,29 +396,11 @@ public final class Store {
     }
 
     /// The live instance for a key; throws `notFound` when it is not cached and `decoding` when it does not decode.
-    /// Plain `throws` on purpose (see `ResourceCache.live`); always an `IonError`.
-    func liveResource<T: Resource>(for key: ResourceKey, as type: T.Type) throws -> Live<T> {
+    func liveResource<T: Resource>(for key: ResourceKey, as type: T.Type) throws(IonError) -> Live<T> {
         guard let live = try resources.live(for: key, as: T.self, codec: codec) else {
-            throw IonError.notFound(key)
+            throw .notFound(key)
         }
         return live
-    }
-
-    /// `find` with plain `throws`, for generic callers inside the package (see `ResourceCache.live`).
-    func findLive<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T> {
-        try await findLive(T.self, request: .find(T.self, id: id, include: include, cache: cache))
-    }
-
-    /// `find(_:request:)` with plain `throws` (see `ResourceCache.live`).
-    func findLive<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> Live<T> {
-        let document = try await load(request, as: T.self)
-        guard !document.isCollection else {
-            throw IonError.decoding(nil, CodecError.unexpectedCollection(path: request.path))
-        }
-        guard let key = document.primary.first else {
-            throw IonError.notFound(request.records.first ?? ResourceKey(type: T.resourceType, id: request.path))
-        }
-        return try liveResource(for: key, as: T.self)
     }
 
     // MARK: Collections

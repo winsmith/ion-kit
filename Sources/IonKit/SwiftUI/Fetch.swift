@@ -19,7 +19,7 @@ import SwiftUI
 public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
     private let request: Request<JSONAPIDocument>
     private let explicitStore: Store?
-    private let load: @MainActor (Store, Request<JSONAPIDocument>) async throws -> Value
+    private let load: @MainActor (Store, Request<JSONAPIDocument>) async throws(IonError) -> Value
     private let peek: @MainActor (Store, Request<JSONAPIDocument>) -> Value?
     private let content: (Value) -> Content
     private let loading: () -> Loading
@@ -57,7 +57,7 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
     ) where Value == Live<T> {
         self.init(
             request: .find(T.self, id: id, include: include, cache: cache), store: store,
-            load: { store, request in try await store.find(T.self, request: request) },
+            load: { store, request throws(IonError) in try await store.find(T.self, request: request) },
             peek: { store, request in store.cachedLive(T.self, request: request) },
             content: content, loading: loading, failed: failed
         )
@@ -88,7 +88,7 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
     ) where Value == LiveCollection<T> {
         self.init(
             request: request, store: store,
-            load: { store, request in try await store.query(T.self, request: request) },
+            load: { store, request throws(IonError) in try await store.query(T.self, request: request) },
             peek: { store, request in store.cachedCollection(T.self, request: request) },
             content: content, loading: loading, failed: failed
         )
@@ -96,7 +96,7 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
 
     private init(
         request: Request<JSONAPIDocument>, store: Store?,
-        load: @escaping @MainActor (Store, Request<JSONAPIDocument>) async throws -> Value,
+        load: @escaping @MainActor (Store, Request<JSONAPIDocument>) async throws(IonError) -> Value,
         peek: @escaping @MainActor (Store, Request<JSONAPIDocument>) -> Value?,
         content: @escaping (Value) -> Content,
         loading: @escaping () -> Loading,
@@ -147,11 +147,11 @@ public struct Fetch<Value, Content: View, Loading: View, Failed: View>: View {
         let store = resolvedStore
         loadTask = Task {
             let next: Phase
-            do {
+            do throws(IonError) {   // a closure body does not infer the thrown type of a `do`
                 next = .loaded(try await load(store, request))
+            } catch .cancelled {
+                return
             } catch {
-                let error = IonError(error)
-                if case .cancelled = error { return }
                 next = .failed(error)
             }
             if !Task.isCancelled, current == run { phase = next }

@@ -4,8 +4,10 @@ extension Store {
     /// Fetches one resource, serving it from the cache when the policy allows, and returns its live instance.
     ///
     /// Usage: `let person = try await store.find(Person.self, id: "42", include: ["tags"])`
-    public func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T> {
-        try await findLive(T.self, id: id, include: include, cache: cache)
+    public func find<T: Resource>(
+        _ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default
+    ) async throws(IonError) -> Live<T> {
+        try await find(T.self, request: .find(T.self, id: id, include: include, cache: cache))
     }
 
     /// Fetches one resource for any GET request built by app code (a singleton endpoint such as `GET me`, say).
@@ -13,8 +15,15 @@ extension Store {
     /// of `request.records` (or a key made from the request path), a collection throws `IonError.decoding`.
     ///
     /// Usage: `let me = try await store.find(User.self, request: Request(method: .get, path: "me", op: .find))`
-    public func find<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> Live<T> {
-        try await findLive(T.self, request: request)
+    public func find<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws(IonError) -> Live<T> {
+        let document = try await load(request, as: T.self)
+        guard !document.isCollection else {
+            throw .decoding(nil, CodecError.unexpectedCollection(path: request.path))
+        }
+        guard let key = document.primary.first else {
+            throw .notFound(request.records.first ?? ResourceKey(type: T.resourceType, id: request.path))
+        }
+        return try liveResource(for: key, as: T.self)
     }
 
     /// The cached live instance for an id, without a request. Decodes a raw included entry on first access.
@@ -49,7 +58,7 @@ extension Store {
     /// Runs any request through the pipeline: a GET goes through the cache step, every response is upserted.
     ///
     /// Usage: `let doc = try await store.request(Request(method: .get, path: "people/42/relationships/tags"))`
-    public func request(_ request: Request<JSONAPIDocument>) async throws -> JSONAPIDocument {
+    public func request(_ request: Request<JSONAPIDocument>) async throws(IonError) -> JSONAPIDocument {
         let cached = try await load(request)
         if let types = request.cache.types, request.method != .get {
             for type in types { invalidate(type: type) }
@@ -58,7 +67,7 @@ extension Store {
     }
 
     /// Runs a request whose response is not a JSON:API document. Nothing is cached or upserted.
-    public func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws -> Response {
+    public func request<Response: Decodable & Sendable>(_ request: Request<Response>) async throws(IonError) -> Response {
         let raw = try RawRequest(request, baseURL: baseURL)
         let sentAt = Date()
         let response: RawResponse
@@ -66,14 +75,13 @@ extension Store {
             response = try await Store.exchange(raw, chain: chain)
             record(nil, for: raw, sentAt: sentAt)
         } catch {
-            let error = IonError(error)
             record(error, for: raw, sentAt: sentAt)
             throw error
         }
         do {
             return try codec.makeDecoder().decode(Response.self, from: response.data)
         } catch {
-            throw IonError.decoding(nil, error)
+            throw .decoding(nil, error)
         }
     }
 }

@@ -70,7 +70,7 @@ struct StoreReadTests {
         }
         do {
             _ = try await store.find(Person.self, id: "404")
-        } catch let error as IonError {
+        } catch {
             #expect(error.isNotFound)
             #expect(error.status == 404)
             #expect(error.errorObjects.first?.title == "Not found")
@@ -79,12 +79,10 @@ struct StoreReadTests {
         do {
             _ = try await store.find(Person.self, id: "null")
             Issue.record("expected notFound")
-        } catch {
-            guard case IonError.notFound(let key) = error else {
-                Issue.record("expected notFound, got \(error)")
-                return
-            }
+        } catch .notFound(let key) {   // typed throws: no cast to IonError
             #expect(key == ResourceKey(type: "person", id: "null"))
+        } catch {
+            Issue.record("expected notFound, got \(error)")
         }
     }
 
@@ -93,12 +91,10 @@ struct StoreReadTests {
         do {
             _ = try await store.find(Person.self, id: "1")
             Issue.record("expected decoding error")
-        } catch {
-            guard case IonError.decoding(let key, _) = error else {
-                Issue.record("expected decoding, got \(error)")
-                return
-            }
+        } catch .decoding(let key, _) {
             #expect(key == ResourceKey(type: "person", id: "1"))
+        } catch {
+            Issue.record("expected decoding, got \(error)")
         }
     }
 
@@ -106,11 +102,9 @@ struct StoreReadTests {
         do {
             _ = try await store.find(Person.self, id: "nowhere")
             Issue.record("expected transport error")
+        } catch .transport {
         } catch {
-            guard case IonError.transport = error else {
-                Issue.record("expected transport, got \(error)")
-                return
-            }
+            Issue.record("expected transport, got \(error)")
         }
     }
 
@@ -159,7 +153,7 @@ struct StoreReadTests {
         do {
             _ = try await store.query(Person.self)
             Issue.record("expected failure")
-        } catch let error as IonError {
+        } catch {
             #expect(error.status == 500)
         }
         mock.respond(to: "GET people", with: [Person(id: "1", name: "Ann")])
@@ -295,11 +289,12 @@ struct StoreReadTests {
         let store = Store(baseURL: MockHandler.defaultBaseURL, handlers: [slow])
         slow.respond(to: "GET people/1", with: Person(id: "1", name: "Ann"))
         let task = Task { @MainActor in
-            do {
+            do throws(IonError) {   // a closure body does not infer the thrown type of a `do`
                 _ = try await store.find(Person.self, id: "1")
                 return "loaded"
+            } catch .cancelled {
+                return "cancelled"
             } catch {
-                if case IonError.cancelled = error { return "cancelled" }
                 return "other: \(error)"
             }
         }

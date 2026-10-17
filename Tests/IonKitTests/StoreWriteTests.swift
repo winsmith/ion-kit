@@ -116,7 +116,7 @@ struct StoreWriteTests {
         do {
             try await store.save(&draft)
             Issue.record("expected 422")
-        } catch let error as IonError {
+        } catch {
             #expect(error.status == 422)
             #expect(error.errors(forAttribute: "name").first?.detail == "name must not be blank")
         }
@@ -135,11 +135,9 @@ struct StoreWriteTests {
         do {
             try await store.save(&person)
             Issue.record("expected invalidDraft")
+        } catch .invalidDraft {
         } catch {
-            guard case IonError.invalidDraft = error else {
-                Issue.record("expected invalidDraft, got \(error)")
-                return
-            }
+            Issue.record("expected invalidDraft, got \(error)")
         }
         #expect(mock.requests.isEmpty)
     }

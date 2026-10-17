@@ -8,26 +8,21 @@ extension Store {
     public func query<T: Resource>(
         _ type: T.Type, filter: [String: String] = [:], sort: [String] = [], page: [String: String] = [:],
         include: [String] = [], cache: CacheOptions = .default
-    ) async throws -> LiveCollection<T> {
-        let request = Request<JSONAPIDocument>.query(T.self, filter: filter, sort: sort, page: page, include: include, cache: cache)
-        return try await queryCollection(T.self, request: request)
+    ) async throws(IonError) -> LiveCollection<T> {
+        try await query(T.self, request: .query(T.self, filter: filter, sort: sort, page: page, include: include, cache: cache))
     }
 
     /// Fetches a collection from a custom path such as `groups/3/members`.
     public func query<T: Resource>(
         _ type: T.Type, path: String, query items: [URLQueryItem] = [], include: [String] = [], cache: CacheOptions = .default
-    ) async throws -> LiveCollection<T> {
-        let request = Request<JSONAPIDocument>.query(T.self, path: path, include: include, query: items, cache: cache)
-        return try await queryCollection(T.self, request: request)
+    ) async throws(IonError) -> LiveCollection<T> {
+        try await query(T.self, request: .query(T.self, path: path, include: include, query: items, cache: cache))
     }
 
-    /// Fetches a collection for any GET request built by app code.
-    public func query<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> LiveCollection<T> {
-        return try await queryCollection(T.self, request: request)
-    }
-
-    /// Plain `throws` on purpose (see `ResourceCache.live`); always an `IonError`.
-    func queryCollection<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws -> LiveCollection<T> {
+    /// Fetches a collection for any GET request built by app code, registered under the request's key.
+    ///
+    /// Usage: `let members = try await store.query(Person.self, request: .query(Person.self, path: "groups/3/members"))`
+    public func query<T: Resource>(_ type: T.Type, request: Request<JSONAPIDocument>) async throws(IonError) -> LiveCollection<T> {
         let raw = try RawRequest(request, baseURL: baseURL)
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
         let collection: LiveCollection<T>
