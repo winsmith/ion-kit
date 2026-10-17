@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// A to-one relationship as ids only: absent from the payload, explicitly null, or one id.
 ///
@@ -98,12 +99,17 @@ public enum ToMany<T: Resource>: Hashable, Sendable {
 // MARK: - Codable
 
 /// Collects the coding keys of relationship properties while a resource is encoded, so the codec can move
-/// exactly those keys into `relationships` without a static key list.
-final class RelationshipKeyCollector {
-    private(set) var paths: [[any CodingKey]] = []
+/// exactly those keys into `relationships` without a static key list. Sendable because `Encoder.userInfo`
+/// holds `any Sendable`.
+final class RelationshipKeyCollector: Sendable {
+    private let recorded = Mutex<[[any CodingKey]]>([])
+
+    var paths: [[any CodingKey]] {
+        recorded.withLock { $0 }
+    }
 
     func record(_ path: [any CodingKey]) {
-        paths.append(path)
+        recorded.withLock { $0.append(path) }
     }
 }
 
