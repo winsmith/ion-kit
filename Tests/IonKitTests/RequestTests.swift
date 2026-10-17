@@ -32,6 +32,17 @@ struct RequestTests {
         #expect(raw.key.value == "GET https://api.example.com/v1/people/42?include=tags")
     }
 
+    @Test func urlSessionHandlerBypassesURLCache() throws {
+        let request = Request<JSONAPIDocument>(method: .patch, path: "people/1", body: Data("{}".utf8))
+        let raw = try RawRequest(request, baseURL: base)
+        let urlRequest = URLSessionHandler.urlRequest(for: raw)
+        #expect(urlRequest.cachePolicy == .reloadIgnoringLocalCacheData)
+        #expect(urlRequest.httpMethod == "PATCH")
+        #expect(urlRequest.url == raw.url)
+        #expect(urlRequest.httpBody == raw.body)
+        #expect(urlRequest.value(forHTTPHeaderField: "Content-Type") == JSONAPIDocument.mediaType)
+    }
+
     @Test func bodyAddsContentType() throws {
         let request = Request<JSONAPIDocument>(method: .post, path: "people", body: Data("{}".utf8))
         let raw = try RawRequest(request, baseURL: base)

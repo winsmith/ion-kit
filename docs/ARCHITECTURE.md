@@ -170,7 +170,7 @@ public protocol RequestHandler: Sendable {
 public struct RawResponse: Sendable { public let status: Int; public let headers: [String: String]; public let data: Data }
 `
 
-`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`; each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`; v1.1 adds `RetryHandler`, which retries idempotent requests (GET by default) after transient transport failures (timeouts, lost or refused connections, DNS and TLS failures; not "offline", which should fail at once) and after 408 / 429 / 500 / 502 / 503 / 504, with exponential backoff and jitter capped at `maxDelay`, honoring `Retry-After` and giving up when it asks for longer than `maxDelay`. It goes first in the chain so every attempt runs through the handlers after it. A `401` surfaces as `IonError.http(status: 401, …)` and the app logs the user out; there is no token-refresh hook (no consumer needs one; decided 2026-10-16).
+`RawRequest` is the request after the store resolved `path` + `query` against its base URL, plus JSON:API headers (`Accept` / `Content-Type: application/vnd.api+json`; media-type parameters such as `ext` and `profile` in a response are accepted and ignored). Handlers form a chain, last one `URLSessionHandler`, which sends every request with `.reloadIgnoringLocalCacheData` so the store's request cache is the only HTTP cache (a session `URLCache` honouring `max-age` would answer the reload after a save with the pre-save response); each may short-circuit, retry, or alter the request. v1 ships `BearerTokenHandler(token: @Sendable () async -> String?)` and `LoggingHandler`; v1.1 adds `RetryHandler`, which retries idempotent requests (GET by default) after transient transport failures (timeouts, lost or refused connections, DNS and TLS failures; not "offline", which should fail at once) and after 408 / 429 / 500 / 502 / 503 / 504, with exponential backoff and jitter capped at `maxDelay`, honoring `Retry-After` and giving up when it asks for longer than `maxDelay`. It goes first in the chain so every attempt runs through the handlers after it. A `401` surfaces as `IonError.http(status: 401, …)` and the app logs the user out; there is no token-refresh hook (no consumer needs one; decided 2026-10-16).
 
 **Store builders (v1)**
 
@@ -576,6 +576,7 @@ No tags or releases exist yet; depend on `main` or a commit.
   response whose `Retry-After` exceeds `maxDelay` as is.
 - `Fetch` (SwiftUI only) renders loading / content / failure for a `find` or `query`, needs a `Store` in the
   environment or as `store:`, shows cached values synchronously and loads again when its request or store changes.
+  Its load is cancelled when the request, store or retry attempt changes, not when the view disappears.
 - `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
@@ -933,6 +934,15 @@ What landed with the v1.x ergonomics pull request beyond the sections above, whi
 - **Not built, on purpose:** POST queries served from the cache and a token-refresh handler (both open questions
   answered "no"); batch mutations and persistence stay separate PRs. Typed throws still wait for the Swift 6.2
   decision ([#1](https://github.com/winsmith/ion-kit/issues/1)).
+- **`Fetch` no longer loads in `.task(id:)`** (found in the Village app, 2026-10-16). On iPhone a collapsed
+  `NavigationSplitView` pushing its detail column sent the detail view `onDisappear` right after `onAppear` and
+  kept it on screen; that cancelled the `.task`, nothing started it again, and the person screen stayed on its
+  progress view. `Fetch` now starts the load in a task it owns, cancels it only when the request, store or retry
+  attempt changes, and drops a result for a run that is no longer current.
+- **`URLSessionHandler` bypasses `URLCache`** (found in the Village app, 2026-10-16). Village sends
+  `Cache-Control: private, max-age=60`, which `URLSession.shared` also honoured: after a save the store invalidated
+  and reloaded the list, the reload was answered from `URLCache` with the pre-save document, and that overwrote the
+  saved value in the live instance. Requests now use `.reloadIgnoringLocalCacheData`.
 - **Toolchain.** This pull request was written without a local Swift toolchain; CI (Xcode 16.3, `swift:6.1`,
   `swift:6.2`) was the compiler.
 
