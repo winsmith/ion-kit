@@ -8,8 +8,9 @@ public enum HTTPMethod: String, Sendable, Hashable {
     case delete = "DELETE"
 }
 
-/// What a request means to the cache: which invalidation rules apply after it succeeds.
-public enum Operation: Sendable, Hashable {
+/// What a request means to the cache: which invalidation rules apply after it succeeds. `Codable` through its raw
+/// value, so cached documents can be written to a `CacheSnapshot`.
+public enum Operation: String, Sendable, Hashable, Codable {
     case find, query, create, update, delete, custom
 }
 

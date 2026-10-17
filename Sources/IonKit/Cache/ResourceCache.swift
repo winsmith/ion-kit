@@ -91,6 +91,23 @@ final class ResourceCache {
         entries[key]?.mutationSequence = sequence
     }
 
+    /// Every entry as written to a snapshot: the raw object and the tombstone flag, sorted by key so the file is
+    /// stable from one save to the next.
+    func snapshotEntries() -> [CacheSnapshot.Entry] {
+        entries
+            .sorted { ($0.key.type, $0.key.id) < ($1.key.type, $1.key.id) }
+            .map { CacheSnapshot.Entry(object: $0.value.raw, isDeleted: $0.value.isDeleted) }
+    }
+
+    /// Stores a raw object read from a snapshot unless the key already has an entry (anything in RAM is newer).
+    /// The entry starts at mutation sequence 0, like everything in a new process. Returns true when it was stored.
+    @discardableResult
+    func restore(_ object: ResourceObject, isDeleted: Bool) -> Bool {
+        guard let key = object.key, entries[key] == nil else { return false }
+        entries[key] = Entry(raw: object, isDeleted: isDeleted)
+        return true
+    }
+
     func removeAll() {
         entries.removeAll()
     }

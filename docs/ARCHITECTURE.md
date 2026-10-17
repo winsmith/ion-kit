@@ -28,7 +28,7 @@ IonKit is a Swift package that lets a SwiftUI app display and edit structs that 
 
 - Offline writes, optimistic UI, conflict resolution.
 - Typed, live-resolving relationship properties; relationship inverses; polymorphic relationships.
-- Persistent cache on disk.
+- Persistent cache on disk (arrived in v1.4 as a snapshot file; see Cache).
 - Sparse fieldsets and field-level merging of partial resources.
 - Code generation or macros for resource definitions.
 - Multi-tenant or admin-only resource types; v1 only needs to not block them.
@@ -220,7 +220,7 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 ## Cache
 
-The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted in v1; a Village graph of a few thousand people and notes fits comfortably in memory.
+The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted in v1; a Village graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below).
 
 **Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `any AnyLiveResource`), `isDeleted` and a `mutationSequence`. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` is the only thing that drops entries in v1.
 
@@ -247,6 +247,15 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 | custom `request` | upsert any resources in the response | nothing unless `cache.types` is set on the request | nothing |
 
 **Batches (v1.3).** `store.batch { … }` defers the last column of this table. Saves and deletes inside the closure update the resource cache and the request cache at once, exactly as above, and a delete still drops its item from every list at once; only the reloads of alive collections wait. When the outermost batch ends, normally or by throwing, every alive collection of each type that was invalidated reloads once, if its `autoRefresh` is on at that moment. A query made inside the batch sees the invalidation and fetches. The batch is store-wide, not task-local: concurrent saves from a task group inside the closure belong to it, and so does a mutation from another screen while it runs; an unstructured task that outlives the closure does not. `clear()` drops the pending reloads. Use it wherever many mutations happen in a row (an import, a bulk edit), instead of turning `autoRefresh` off on whichever collection is on screen and reloading by hand.
+
+**Persistence (v1.4, [#10](https://github.com/winsmith/ion-kit/issues/10)).** A store created with `snapshotURL:` writes both caches to that file on `saveSnapshot()` and reads them back on `loadSnapshot()`, so a cold launch renders the last session's data before the first response and stays read-only usable offline. The file is a `CacheSnapshot` encoded as JSON: `formatVersion`, the store's `baseURL`, every resource entry as its raw `ResourceObject` plus `isDeleted`, and every `CachedDocument` keyed by `RequestKey.value` (keys, links, meta, operation, `receivedAt`, `invalidatedAt`, types, `serverExpiry`, `etag`). Live instances, collections, in-flight requests and `mutationSequence` are not written: live instances are recreated on first typed access as for any raw entry, and sequences restart at 0 with the store's mutation counter, which a new process starts at 0 too.
+
+- *Loading.* `loadSnapshot()` decodes the file off the main actor, then fills only keys that have no entry yet, in both caches: anything already in RAM is newer and wins. Alive collections are not touched. A missing, corrupt or undecodable file, another `formatVersion` or another `baseURL` is discarded silently (the method returns false and the file stays as it is) and the store starts empty. A `clear()` while the file is being read wins: the load discards what it read. Call it once, before the first request.
+- *Restored documents are stale.* A document from the snapshot carries an internal `isRestored` flag and the cache step treats it as `.stale` whatever its age, the policy's hard expiry or the server's expiry say: it is served at once and refetched in the background on its first load, with `If-None-Match` when it has an ETag. Only a document that was invalidated after it was received (`invalidatedAt > receivedAt`, saved that way) restores as `.expired`. The first ingest or 304 for the key clears the flag, after which the policy decides as usual. `Fetch` therefore shows restored data synchronously and makes exactly one background request.
+- *Struct changes.* A restored document whose primary resources no longer decode as the requested type (the app's struct changed since the save) is dropped from the request cache when it is first loaded, ETag included, and the load fetches outright instead of throwing `.decoding`. Collections skip items that do not decode, as they always did.
+- *Saving.* `saveSnapshot()` copies the raw objects and documents on the main actor, then encodes and writes off it with an atomic write (temporary file and rename) after creating the parent directory. Saves and the file deletion of `clear()` run one after another in call order, so a save immediately followed by `clear()` leaves no file. Nothing is saved automatically; the app saves when it goes to the background.
+- *Protection.* IonKit takes a URL and does nothing else to the file: the app chooses the directory and its file protection (on iOS a new file gets the app's default protection class).
+- *Gaps.* `peek` and `resolve` serve a restored resource without revalidating it, because they never consult the request cache (the same as for a resource included by an earlier response). Pages appended by `loadMore()` are cached under their own keys and revalidate on their next load like any document, but a restored collection shows only its first page until `loadMore()` runs.
 
 The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`. `clear()` resets every alive collection to `.idle` with no items and cancels a reload it may be running, so a logout mid-reload cannot bring old data back.
 
@@ -429,7 +438,14 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Outcomes are reported through one optional closure, `store.onError(error, request)`, plus an observable `lastTransportError`; once per request, never `.cancelled`, never for accepted statuses (2026-10-17, v1.3) | A 401 from a background revalidation or a `Fetch` had no caller to sign out from; a closure keeps the store free of a delegate protocol, and the request lets apps exempt auth endpoints. The latest-sent request decides "offline", the same rule the request cache uses |
 | `batch` defers only the reloads of alive collections, is store-wide (a depth counter on the main actor, not a task-local) and flushes on throw (2026-10-17, v1.3, [#11](https://github.com/winsmith/ion-kit/issues/11)) | Staleness must stay immediate so a query inside the batch never sees pre-save data; a task-local would miss saves made from task-group children |
 | A DELETE answered with 404 counts as deleted (2026-10-17, v1.3) | JSON:API says a server SHOULD answer 404 for a missing resource; the outcome the user wanted holds, and a retried DELETE becomes safe. A routing bug that answers 404 would also "succeed"; accepted |
-| Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence is a v3 feature with a clear seam (`CacheSnapshot`) |
+| Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence came in v1.4 through the seam reserved for it (`CacheSnapshot`) |
+| The snapshot is one JSON file written through `Codable`, not SQLite (2026-10-17, v1.4, [#10](https://github.com/winsmith/ion-kit/issues/10)) | Every cached type was already `Codable`; a few thousand resources encode in milliseconds; no dependency and the same code on Linux |
+| Restored documents are always served stale, whatever their age and whatever the policy's hard expiry or the server's expiry say; only one invalidated before the save is expired (2026-10-17, v1.4) | An offline launch days later must still show the last session's data; the first load revalidates it in the background |
+| Restored entries start at mutation sequence 0 (2026-10-17, v1.4) | The store's mutation counter starts at 0 in every process; a restored higher sequence would reject every response until that many mutations happened |
+| A snapshot for another `baseURL` or `formatVersion` is discarded, not migrated (2026-10-17, v1.4) | It is a cache: starting empty costs one round of requests; migrations would be code nobody tests |
+| Snapshots are saved and loaded explicitly by the app, never automatically (2026-10-17, v1.4) | The app knows its lifecycle (`scenePhase`); a store saving on every response would write constantly |
+| `loadSnapshot()` and `saveSnapshot()` return `Bool` instead of throwing (2026-10-17, v1.4) | Keeps "every throwing store method throws `IonError` only"; the app cannot act on a disk error beyond starting empty |
+| `peek` and `resolve` may serve a restored resource without revalidating it (2026-10-17, v1.4) | They never consult the request cache, as for resources included by an earlier response; the documents that list them revalidate on their first load |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors. Default rules stay on, with trailing commas required in multi-line collection literals (the style the code already used); short names such as `op` are suppressed at their declaration with a reason, not turned off repo-wide |
@@ -456,7 +472,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v2["v2 Depth"] --> v3["v3 Persistence"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -500,11 +516,18 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] `delete` treats a 404 as success.
 - [ ] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate).
 
-Separate PRs, not part of these milestones: cache persistence ([issue #10](https://github.com/winsmith/ion-kit/issues/10), v3); typed throws ([issue #1](https://github.com/winsmith/ion-kit/issues/1), needs the Swift 6.2 decision).
+**v1.4 — Persistence** (the cache snapshot from v3, [issue #10](https://github.com/winsmith/ion-kit/issues/10)) — package side done 2026-10-17
+
+- [x] `CacheSnapshot` and `Store(snapshotURL:)`: `saveSnapshot()` writes the resource cache (raw entries, tombstones) and the request cache atomically, off the main actor; `loadSnapshot()` restores both before the first request.
+- [x] Restored documents are served stale whatever their age and revalidate on their first load; one invalidated before the save is expired; RAM wins over the snapshot.
+- [x] A missing, corrupt, other-version or other-base-URL file is discarded silently; `clear()` deletes the file and overtakes a load in progress; a restored entry that no longer decodes is fetched again.
+- [ ] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate).
+
+Separate PRs, not part of these milestones: typed throws ([issue #1](https://github.com/winsmith/ion-kit/issues/1), needs the Swift 6.2 decision).
 
 **v2 — Depth**: `related(\.key)` observable relationship resolution; LRU eviction with a size cap; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
-**v3 — Persistence**: `CacheSnapshot` (encode the resource cache + request cache to a JSON or SQLite file, load on launch, serve as `.stale` until refreshed); optional offline write queue built on `Draft` values; conflict detection via a `version` attribute.
+**v3 — Offline writes**: optional offline write queue built on `Draft` values, persisted next to the cache snapshot (which shipped in v1.4); conflict detection via a `version` attribute.
 
 ## Guidance for implementers (humans and agents)
 
@@ -553,16 +576,16 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v1.3, 2026-10-17)
+## Current state of the code (v1.4, 2026-10-17)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as of the v1.3 pull request on 2026-10-17; update it
+signatures are, and what to rely on. It describes the package as of the v1.4 pull request on 2026-10-17; update it
 in the same pull request as any public API change.
 
 **Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page reload,
-ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes) and v1.3 (`onError`, `lastTransportError`, `batch`,
-DELETE 404 as success) are implemented in `Sources/IonKit` (about 3,400 lines) with
-`Sources/IonKitTesting` (about 220 lines) and about 100 swift-testing tests that pass on macOS 15 (Xcode 16.3) and in
+ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`,
+DELETE 404 as success) and v1.4 (cache snapshot) are implemented in `Sources/IonKit` (about 3,600 lines) with
+`Sources/IonKitTesting` (about 240 lines) and about 115 swift-testing tests that pass on macOS 15 (Xcode 16.3) and in
 the `swift:6.1` and `swift:6.2` containers. Nothing on the v2 / v3 lists exists yet. There is no sample app and the
 fixtures are synthetic.
 
@@ -570,14 +593,14 @@ fixtures are synthetic.
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.3.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.4.0"),
 …
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
 Platforms: macOS 15, iOS 18, Linux (Swift 6.1+). Swift 6 language mode with strict concurrency; Foundation only.
-Releases are git tags (`1.1`, `1.2`, `1.3.0`, …) following semantic versioning; depend on a version range
+Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, …) following semantic versioning; depend on a version range
 (`from:`) rather than `main`. A release is cut by merging its pull request and tagging the merge commit on `main`.
 
 **Behaviors to rely on.**
@@ -612,6 +635,11 @@ Releases are git tags (`1.1`, `1.2`, `1.3.0`, …) following semantic versioning
 - Inside `store.batch { }`, mutations update caches and lists at once but alive collections reload only when the
   outermost batch ends, once per collection, also when the closure throws.
 - `delete` succeeds on 404: the resource is tombstoned and leaves every list as for a 2xx.
+- With `snapshotURL:`, `saveSnapshot()` writes both caches atomically and `loadSnapshot()` restores them; both
+  return `Bool` and never throw. Restored documents are served at once and revalidated in the background on their
+  first load, however old they are; RAM wins over the snapshot; a file from another version or base URL, or one
+  that does not decode, is ignored; `clear()` deletes the file. Saving is the app's job (on `scenePhase ==
+  .background`, say), and so is the file's protection class.
 - `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
@@ -737,7 +765,7 @@ public enum ISO8601 { static func parse(_ string: String) -> Date?; static func 
 ```swift
 // Requests/
 public enum HTTPMethod: String, Sendable { case get, post, patch, delete }
-public enum Operation: Sendable { case find, query, create, update, delete, custom }
+public enum Operation: String, Sendable, Codable { case find, query, create, update, delete, custom }   // Codable since v1.4
 public struct CacheOptions: Sendable, Hashable {
     var key: String?; var reload: Bool; var backgroundReload: Bool; var types: Set<String>?
     init(key: String? = nil, reload: Bool = false, backgroundReload: Bool = false, types: Set<String>? = nil)
@@ -813,10 +841,17 @@ public struct DefaultCachePolicy: CachePolicy {
     init(soft: TimeInterval = 60, hard: TimeInterval = 86_400, honorsServerHeaders: Bool = true)
 }
 public struct NoCachePolicy: CachePolicy { init() }              // every entry .expired
-public struct CachedDocument: Sendable {                          // keys, not copies
+public struct CachedDocument: Sendable, Codable {                 // keys, not copies; Codable since v1.4
     var primary: [ResourceKey]; var included: [ResourceKey]; var isCollection: Bool
     var links: Links; var meta: [String: JSONValue]?; var op: Operation
     var receivedAt: Date; var invalidatedAt: Date?; var types: Set<String>?; var serverExpiry: Date?; var etag: String?
+}
+public struct CacheSnapshot: Codable, Sendable {                  // v1.4; the snapshot file's format
+    static let currentFormatVersion: Int                          // 1
+    var formatVersion: Int; var baseURL: URL
+    var resources: [Entry]                                        // struct Entry: Codable, Sendable { var object: ResourceObject; var isDeleted: Bool }
+    var documents: [String: CachedDocument]                       // keyed by RequestKey.value
+    init(formatVersion: Int = currentFormatVersion, baseURL: URL, resources: [Entry] = [], documents: [String: CachedDocument] = [:])
 }
 ```
 
@@ -832,8 +867,9 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
     var resolveStrategy: ResolveStrategy                          // v1.1; default .oneByOne
     var onError: (@MainActor (IonError, RawRequest) -> Void)?     // v1.3; once per failed request, never .cancelled
     private(set) var lastTransportError: IonError?                // v1.3; observable, latest-sent request wins
+    let snapshotURL: URL?                                         // v1.4; nil: RAM only
     init(baseURL: URL, handlers: [any RequestHandler] = [URLSessionHandler()],
-         codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy())
+         codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy(), snapshotURL: URL? = nil)
 
     // reads
     func find<T: Resource>(_ type: T.Type, id: String, include: [String] = [], cache: CacheOptions = .default) async throws -> Live<T>
@@ -860,9 +896,13 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
     // cache control
     func invalidate(type: String)                                 // expire queries of the type, reload alive collections (after a batch)
     func invalidate(key: ResourceKey)                             // expire documents whose primary data lists the key
-    func clear()                                                  // logout
+    func clear()                                                  // logout; also deletes the snapshot file (v1.4)
     func upsert(_ document: JSONAPIDocument)                      // push payloads, seeds; no request
     var cachedResourceCount: Int { get }
+
+    // persistence (v1.4); no-ops returning false without snapshotURL
+    @discardableResult func loadSnapshot() async -> Bool          // false: nothing usable, caches untouched
+    @discardableResult func saveSnapshot() async -> Bool          // false: encoding or writing failed
 }
 ```
 
@@ -946,9 +986,31 @@ extension Store { func seed<T: Resource>(_ values: [T]) }
 ```
 
 **Not there yet** (so do not code against it): `related(\.key)`, token refresh, POST queries served from the cache,
-a batched request format (`batch` coalesces reloads; each save is still its own request), eviction, persistence, client-generated
+a batched request format (`batch` coalesces reloads; each save is still its own request), eviction, an offline write queue, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-17, v1.4)
+
+- **One state function.** `Store.state(of:)` wraps the policy for both the cache step (`load`) and the synchronous
+  lookup `Fetch` uses (`cachedDocument(for:)`), so a restored document is stale in both and a `Fetch` shows it at
+  once and then makes exactly one background request. The policy protocol did not change: a custom `CachePolicy`
+  never sees the restored flag.
+- **Why sequences are not saved.** `ResourceCache.upsert` rejects a response when the entry's `mutationSequence`
+  is above the request's start sequence. The store's counter starts at 0 in a new process, so a restored sequence
+  of 12 would have rejected every response until twelve mutations happened.
+- **Restoring never overwrites.** `ResourceCache.restore` and `RequestCache.restore` fill only empty keys; the
+  existing `upsert` would have cleared tombstones and replaced newer RAM data.
+- **Ordering on disk.** Saves and the deletion in `clear()` are chained on one task (`snapshotTail`), each waiting
+  for the previous, and a save copies the caches synchronously before its first suspension. `clear()` also bumps a
+  generation that a load checks after decoding, the same pattern as `LiveCollection.generation`.
+- **Dates in the file** use `Date`'s own `Codable` form (seconds since 2001 as a number) rather than ISO 8601, which
+  drops sub-second precision: an invalidation in the same second as its response would have looked older than it
+  after a round trip, and the document would have restored as stale instead of expired.
+- **Base URL check** compares `absoluteString`, since `URL`'s `Codable` form keeps a relative URL's base apart and
+  two equal addresses can be unequal `URL` values.
+- **Toolchain.** Built and tested locally in the `swift:6.1` and `swift:6.2` containers; SwiftLint and Xcode 16.3
+  ran in CI.
 
 ## Implementation notes (2026-10-17, v1.3)
 
