@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// The identity map: one entry per `ResourceKey` holding the latest raw object and, once typed access happened,
 /// the single `Live<T>` for it. A delete leaves a tombstone. Entries are removed by `clear()` and, when the store
@@ -23,6 +24,11 @@ final class ResourceCache {
     }
 
     private(set) var entries: [ResourceKey: Entry] = [:]
+    /// The store that owns this cache, handed to every `Live` it creates so that `Live.related` can find it.
+    weak var store: Store?
+    /// One observable counter per resource type, created on first read by `related` and bumped whenever a key of
+    /// that type enters or leaves the cache. Never removed, so a view's tracking survives `clear()`.
+    private var revisions: [String: TypeRevision] = [:]
     /// Advances on every write or typed read of an entry, so `lastUsed` orders entries from least to most recently used.
     private(set) var clock = 0
 
@@ -31,6 +37,20 @@ final class ResourceCache {
     private func tick() -> Int {
         clock += 1
         return clock
+    }
+
+    /// The observable counter for a resource type; reading its `value` makes the caller re-render when a key of
+    /// that type is added to or removed from the cache.
+    func revision(for type: String) -> TypeRevision {
+        if let revision = revisions[type] { return revision }
+        let revision = TypeRevision()
+        revisions[type] = revision
+        return revision
+    }
+
+    /// Records that the set of keys of a type changed. Nothing to do when no one ever read the type's revision.
+    private func bumpRevision(of type: String) {
+        revisions[type]?.value += 1
     }
 
     func entry(for key: ResourceKey) -> Entry? {
@@ -56,15 +76,16 @@ final class ResourceCache {
                 }
                 live.markDeleted(false)
             } else if let typed {
-                entry.live = Live<T>(key: key, value: typed, raw: object)
+                entry.live = Live<T>(key: key, value: typed, raw: object, store: store)
             }
             entries[key] = entry
         } else {
             var entry = Entry(raw: object, lastUsed: tick())
             if let typed {
-                entry.live = Live<T>(key: key, value: typed, raw: object)
+                entry.live = Live<T>(key: key, value: typed, raw: object, store: store)
             }
             entries[key] = entry
+            bumpRevision(of: key.type)
         }
         return true
     }
@@ -86,7 +107,7 @@ final class ResourceCache {
             return live
         }
         let value: T = try codec.decode(entry.raw)
-        let live = Live<T>(key: key, value: value, raw: entry.raw)
+        let live = Live<T>(key: key, value: value, raw: entry.raw, store: store)
         live.markDeleted(entry.isDeleted)
         entries[key]?.live = live
         entries[key]?.lastUsed = tick()
@@ -138,7 +159,8 @@ final class ResourceCache {
 
     /// Drops an entry (eviction). Its `Live`, if any, is no longer reachable through the store.
     func remove(_ key: ResourceKey) {
-        entries[key] = nil
+        guard entries.removeValue(forKey: key) != nil else { return }
+        bumpRevision(of: key.type)
     }
 
     /// Every entry as written to a snapshot: the raw object and the tombstone flag, sorted by key so the file is
@@ -155,12 +177,24 @@ final class ResourceCache {
     func restore(_ object: ResourceObject, isDeleted: Bool) -> Bool {
         guard let key = object.key, entries[key] == nil else { return false }
         entries[key] = Entry(raw: object, isDeleted: isDeleted)
+        bumpRevision(of: key.type)
         return true
     }
 
+    /// Drops every entry (`clear()`). The revisions stay, bumped, so every view that read one re-renders.
     func removeAll() {
         entries.removeAll()
+        for revision in revisions.values {
+            revision.value += 1
+        }
     }
+}
+
+/// A counter per resource type that `Store.related` reads so Observation re-runs it when a key of the type is
+/// added to or removed from the cache. Changes to existing entries are observed on their `Live` instead.
+@MainActor @Observable
+final class TypeRevision {
+    var value = 0
 }
 
 /// Stands in for "no typed primary" in the generic upsert and load paths.

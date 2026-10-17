@@ -23,6 +23,33 @@ extension Store {
         relationship.keys.compactMap { peek(T.self, key: $0) }
     }
 
+    /// The observable form of `peek`: the cached instances of a to-many relationship, in id order, skipping ids not
+    /// in the cache, duplicate ids and deleted resources (as `LiveCollection.items` does). Reading it from a view
+    /// body or `withObservationTracking` re-runs it when a resource of the type enters or leaves the cache or one of
+    /// the returned instances is deleted. Never sends a request. Works with any relationship value, a draft's too.
+    ///
+    /// Usage: `ForEach(store.related(draft.value.tags)) { tag in Text(tag.value.name) }`
+    public func related<T: Resource>(_ relationship: ToMany<T>) -> [Live<T>] {
+        _ = resources.revision(for: T.resourceType).value   // tracked: keys of this type added or removed
+        var seen = Set<ResourceKey>()
+        var result: [Live<T>] = []
+        for key in relationship.keys where seen.insert(key).inserted {
+            if let live = peek(T.self, key: key), !live.isDeleted {
+                result.append(live)
+            }
+        }
+        return result
+    }
+
+    /// The observable form of `peek` for a to-one relationship: nil when the target is not cached or deleted.
+    ///
+    /// Usage: `if let group = store.related(draft.value.group) { Text(group.value.name) }`
+    public func related<T: Resource>(_ relationship: ToOne<T>) -> Live<T>? {
+        _ = resources.revision(for: T.resourceType).value   // tracked: keys of this type added or removed
+        guard let live = peek(relationship), !live.isDeleted else { return nil }
+        return live
+    }
+
     /// The live instance of a to-one relationship, fetching it when it is not cached.
     public func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws(IonError) -> Live<T>? {
         guard let key = relationship.key else { return nil }

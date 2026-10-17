@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 import IonKitTesting
 @testable import IonKit
@@ -95,6 +96,41 @@ struct CacheEvictionTests {
         #expect(store.cachedResourceCount == 2, "the held one and the newest")
         #expect(isCached(store, person("1")) && isCached(store, person("3")))
         #expect(store.peek(Person.self, id: "1") === ann, "still the one instance")
+    }
+
+    @Test func relatedMakesTheRelatedResourcesTheMostRecentlyUsed() async throws {
+        let mock = MockHandler()
+        respondWithPeople(mock, ["3"])
+        let store = Store(baseURL: base, handlers: [mock], maxCachedResources: 3)
+        store.seed([Tag(id: "7", name: "friend"), Tag(id: "8", name: "colleague")])
+        var ann = Person(id: "1", name: "Ann")
+        ann.tags = .ids(["7"])
+        store.seed([ann])
+        let live = try #require(store.peek(Person.self, id: "1"))
+        _ = live.related(\.tags)
+
+        _ = try await store.find(Person.self, id: "3")
+        #expect(isCached(store, ResourceKey(type: "tag", id: "7")), "related counts as a use")
+        #expect(!isCached(store, ResourceKey(type: "tag", id: "8")))
+    }
+
+    @Test func anEvictedRelatedResourceLeavesRelatedAndFires() async throws {
+        let mock = MockHandler()
+        respondWithPeople(mock, ["3"])
+        let store = Store(baseURL: base, handlers: [mock], maxCachedResources: 2)
+        store.seed([Tag(id: "7", name: "friend")])
+        var ann = Person(id: "1", name: "Ann")
+        ann.tags = .ids(["7"])
+        store.seed([ann])
+        let live = try #require(store.peek(Person.self, id: "1"))
+        #expect(live.related(\.tags).count == 1, "read, but not held")
+
+        try await confirmation { changed in
+            withObservationTracking { _ = live.related(\.tags) } onChange: { changed() }
+            _ = try await store.find(Person.self, id: "3")
+        }
+        #expect(live.related(\.tags).isEmpty)
+        #expect(!isCached(store, ResourceKey(type: "tag", id: "7")))
     }
 
     @Test func anAliveCollectionKeepsItsResourcesAndDocument() async throws {

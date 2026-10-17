@@ -84,6 +84,7 @@ public final class Store {
         self.cachePolicy = cachePolicy
         self.snapshotURL = snapshotURL
         self.maxCachedResources = maxCachedResources
+        resources.store = self
     }
 
     // MARK: Cache control

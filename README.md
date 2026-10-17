@@ -22,7 +22,7 @@ IonKit needs Swift 6.2 or later (Xcode 26 on Apple platforms) and runs on macOS 
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.6.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.7.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -40,7 +40,7 @@ struct Person: Resource {
     var name: String
     var birthday: Date?
     var notes: String = ""
-    var tags: ToMany<Tag> = .unloaded        // relationships are ids only in v1
+    var tags: ToMany<Tag> = .unloaded        // a relationship holds ids; person.related(\.tags) gives instances
     var group: ToOne<Group> = .unloaded
 
     var initials: String { name.split(separator: " ").compactMap(\.first).map(String.init).joined() }
@@ -132,6 +132,18 @@ try await people.reload()                                    // every loaded pag
 let tags = store.peek(person.value.tags)                      // cached instances, no request
 let allTags = try await store.resolve(person.value.tags)      // peek, then find the gaps
 store.resolveStrategy = .batched()                            // …or one GET tags?filter[id]=7,9 per 50 gaps, if the server filters
+```
+
+In a view, read relationships through `related` (since 1.7). It returns the cached instances like `peek`, but it is
+observable: the view re-renders when a related resource arrives later (an `include`, a `resolve`, another screen's
+query), leaves the cache or is deleted, and when the relationship's ids change. It never sends a request, and it
+skips deleted resources and duplicate ids, so it is safe for `ForEach`.
+
+```swift
+ForEach(person.related(\.tags)) { tag in Text(tag.value.name) }   // re-renders when tag 9 lands
+if let group = person.related(\.group) { Text(group.value.name) }
+store.related(draft.value.tags)                                   // the same for a draft's (or any) relationship value
+.task { _ = try? await store.resolve(person.value.tags) }         // fetch the gaps; related updates by itself
 ```
 
 Every GET goes through the cache first. `DefaultCachePolicy` serves documents younger than one minute as fresh,
@@ -263,9 +275,9 @@ docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux, the minim
 
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
 `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
-as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum) and v1.6 (LRU eviction) are implemented
-and tested against `MockHandler`. Releases are git tags; depend on `from: "1.6.0"`. See the milestone list in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
+as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction) and v1.7
+(observable `related`) are implemented and tested against `MockHandler`. Releases are git tags; depend on
+`from: "1.7.0"`. See the milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
 
