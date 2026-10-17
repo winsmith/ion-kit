@@ -1,0 +1,25 @@
+# SwiftLint configuration for IonKit. CI runs `swiftlint lint` with this file; run the same locally before pushing.
+
+disabled_rules:
+  - identifier_name # short names such as `op`, `a`, `b` and `id` are idiomatic here
+  - opening_brace # multi-line conditions put the brace on its own line
+  - trailing_comma
+  - cyclomatic_complexity
+opt_in_rules:
+  - empty_count
+
+included:
+  - Package.swift
+  - Sources
+  - Tests
+excluded:
+  - .build
+
+force_try: warning # IonKitTesting crashes on purpose when a fixture fails to encode
+line_length: 200
+type_body_length:
+  warning: 400
+  error: 600
+file_length:
+  warning: 600
+  error: 1000

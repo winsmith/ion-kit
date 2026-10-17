@@ -13,7 +13,12 @@ swift build
 swift test
 swift build -c release
 docker run --rm -v $PWD:/src -w /src swift:6.1 swift test   # Linux, what CI runs
+swiftlint                                                    # brew install swiftlint; config in .swiftlint.yml
+docker run --rm -v $PWD:/src -w /src ghcr.io/realm/swiftlint:0.59.1 swiftlint   # the version CI runs
 ```
+
+Run `swiftlint` locally before every push; the SwiftLint workflow fails on errors and annotates warnings. Fix
+new warnings rather than adding them; `// swiftlint:disable:next <rule>` needs a reason in the same comment.
 
 Tests use swift-testing and `IonKitTesting.MockHandler`; nothing touches the network.
 
@@ -71,6 +76,7 @@ raise their `from:` requirement and re-resolve; Village does that in its own pul
 ## Definition of done
 
 - `swift build` and `swift test` pass on macOS and in the `swift:6.1` container.
+- `swiftlint` reports no errors and no new warnings.
 - New behavior has a test against `MockHandler`, not the network.
 - Public API changes are reflected in `docs/ARCHITECTURE.md` and, if usage changes, in the README.
 - The milestone list in `docs/ARCHITECTURE.md` is updated: done items ticked, surprises added as open questions

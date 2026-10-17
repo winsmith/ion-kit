@@ -432,6 +432,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence is a v3 feature with a clear seam (`CacheSnapshot`) |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
+| SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors; `.swiftlint.yml` keeps short names, own-line braces after multi-line conditions and trailing commas, which the code already uses |
 | A relationship set on a draft whose `original` had it `.unloaded` is sent; one that is `.unloaded` in the draft never is (added during v0.3, confirmed 2026-10-15) | Otherwise an edit to a resource fetched without `include` is dropped silently |
 | Minimum Linux toolchain is Swift 6.1; CI runs `swift:6.1` and `swift:6.2` (added 2026-10-15) | 6.1 is what the implementation was verified on; 6.0 was never run |
 | ETags live on documents, not resources: `If-None-Match` on GETs, no `If-Match` on writes (2026-10-16) | The request cache is where revalidation pays off; Village sends no ETag at all and decided against version checks |
@@ -528,6 +529,7 @@ IonKit/
   Examples/VillageSample/       the sample app, not part of the package build on Linux (not yet created)
   docs/ARCHITECTURE.md          this document
   AGENTS.md                     the agent guide: commands, conventions, definition of done; CLAUDE.md points to it
+  .swiftlint.yml                SwiftLint rules; run `swiftlint` before pushing, CI runs it on every push
 `
 
 **Conventions**
@@ -542,9 +544,10 @@ IonKit/
 **Definition of done for a task**
 
 1. `swift build` and `swift test` pass on macOS and in the `swift:6.1` Linux container (`docker run --rm -v $PWD:/src -w /src swift:6.1 swift test`); CI also runs `swift:6.2`.
-2. New behavior has a test against `MockHandler`, not the network.
-3. Public API changes are reflected in this document (`docs/ARCHITECTURE.md`, the relevant section) and in the README example if it changes usage.
-4. The milestone list above is updated: done items ticked, surprises added as open questions.
+2. `swiftlint` (configured by `.swiftlint.yml` at the repository root) reports no errors and no new warnings when run locally before pushing; the SwiftLint workflow runs the same check in CI with `ghcr.io/realm/swiftlint:0.59.1`.
+3. New behavior has a test against `MockHandler`, not the network.
+4. Public API changes are reflected in this document (`docs/ARCHITECTURE.md`, the relevant section) and in the README example if it changes usage.
+5. The milestone list above is updated: done items ticked, surprises added as open questions.
 
 **Suggested task split for v0.1** (each is one PR an agent can take independently): (a) `JSONValue` + document types with fixture round-trips; (b) `Resource`, `ToOne`/`ToMany`, `ResourceKey`; (c) `ResourceCodec` decode/encode/diff; (d) `Request`/handlers/`URLSessionHandler`/`IonError`; (e) `MockHandler` + CI workflow. (b) and (c) depend on (a); (d) and (e) are independent.
 
