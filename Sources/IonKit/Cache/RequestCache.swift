@@ -42,6 +42,9 @@ public struct CachedDocument: Sendable {
         self.etag = etag
     }
 
+    /// Every resource the document lists, primary first.
+    var allKeys: [ResourceKey] { primary + included }
+
     /// The entry after a 304: validated at `sentAt` (when the conditional request left, so an invalidation that
     /// happened during the round trip still counts), with the 304's caching headers or, when it carries none, the
     /// previous lifetime shifted forward.
@@ -99,6 +102,17 @@ final class RequestCache {
         restored.isRestored = true
         entries[key] = restored
         return true
+    }
+
+    /// For each resource, the documents that list it (as primary or included data).
+    func documentsByResource() -> [ResourceKey: [RequestKey]] {
+        var listing: [ResourceKey: [RequestKey]] = [:]
+        for (requestKey, document) in entries {
+            for key in document.allKeys {
+                listing[key, default: []].append(requestKey)
+            }
+        }
+        return listing
     }
 
     func removeAll() {

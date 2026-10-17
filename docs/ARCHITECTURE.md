@@ -6,9 +6,10 @@
 > 2026-10-15 and was moved into the repository, with the revisions listed under
 > [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
 > on 2026-10-16, v1.2 (two fixes found in the Village app), v1.3 (the request outcome observer, `batch` and
-> DELETE 404 as success), v1.4 (the cache snapshot) and v1.5 (typed throws on Swift 6.2) on 2026-10-17. Consumers of
-> the library start at [Current state of the code](#current-state-of-the-code-v15-2026-10-17). Change the code and
-> this file in the same pull request.
+> DELETE 404 as success), v1.4 (the cache snapshot), v1.5 (typed throws on Swift 6.2) and v1.6 (LRU eviction) on
+> 2026-10-17. Consumers of the library start at
+> [Current state of the code](#current-state-of-the-code-v16-2026-10-17). Change the code and this file in the same
+> pull request.
 
 ## Purpose and goals
 
@@ -220,9 +221,9 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 ## Cache
 
-The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted in v1; a Village graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below).
+The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted by default; a Village graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below); since v1.6 a store can cap the resource cache and evict the least recently used resources (see Eviction below).
 
-**Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `any AnyLiveResource`), `isDeleted` and a `mutationSequence`. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` is the only thing that drops entries in v1.
+**Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `AnyObject` and read as `any AnyLiveResource`, so eviction can check whether anything else holds it), `isDeleted`, a `mutationSequence` and, since v1.6, a `lastUsed` stamp. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` drops every entry; eviction (v1.6, opt-in) drops the least recently used ones that nothing holds.
 
 **Request cache** — `[RequestKey: CachedDocument]` where `CachedDocument` holds `primary: [ResourceKey]`, `included: [ResourceKey]`, `links`, `meta`, `receivedAt`, `invalidatedAt`, an optional `types: Set<String>`, `serverExpiry` and the response's `etag`. It stores keys, not copies, so a cached collection always materializes from the current live instances. `RequestKey` = method + resolved URL with sorted query, or `cache.key` when set (required to cache a POST query). A response to a request that was sent before a newer document for the same key landed does not replace that document.
 
@@ -257,9 +258,18 @@ The cache is two dictionaries owned by the store, both main-actor only, both in 
 - *Protection.* IonKit takes a URL and does nothing else to the file: the app chooses the directory and its file protection (on iOS a new file gets the app's default protection class).
 - *Gaps.* `peek` and `resolve` serve a restored resource without revalidating it, because they never consult the request cache (the same as for a resource included by an earlier response). Pages appended by `loadMore()` are cached under their own keys and revalidate on their next load like any document, but a restored collection shows only its first page until `loadMore()` runs.
 
+**Eviction (v1.6).** `Store(maxCachedResources:)` (also settable later) caps the resource cache; `nil`, the default, keeps everything as before. Every entry carries a `lastUsed` stamp from a counter in the resource cache that advances on every write (upsert, tombstone, a successful mutation) and every typed read (`peek`, `find`, `resolve`, a collection materializing its items, `Fetch`'s synchronous lookup). A cached document served again (a fresh or stale hit, a 304) stamps every resource it lists, so a resource is never colder than a document that lists it. After each operation that adds entries (an ingested response, `upsert`, `save`, `delete`, `loadSnapshot()`) and whenever the cap is lowered, the store evicts while it holds more than the cap, coldest first, skipping:
+
+- resources stamped by the operation that triggered the pass, so a response larger than the cap is kept whole and `find` can return its instance;
+- a resource whose `Live` is held outside the cache: by a view, a `Fetch`, a variable, a collection's `items` (checked with `isKnownUniquelyReferenced`, so the check adds no reference). This is what keeps "one `Live<T>` per key" true: an instance anyone can still see is never dropped from the identity map;
+- the loaded pages of every alive collection and every key, included ones too, of its cached first page;
+- a resource mutated locally after the oldest fetch still in progress started: its `mutationSequence` is what makes that fetch's response lose against the save, and a recreated entry would not remember it.
+
+Evicting a resource removes every cached document that lists it, as primary or included data, so a document never materializes with gaps; its next load fetches and waits, as for an expired document. Documents themselves are not counted. The cap is a target, not a limit: when everything left is in use the store holds more, and the next pass catches up. Entries restored from a snapshot are stamped 0 (older than anything used since) and evicted in key order; a capped store's snapshot holds what survived. A dropped `Live` that nobody held cannot be observed, so eviction never changes what a view shows; a later access decodes the next response into a new instance.
+
 The store finds alive collections through a weak registry `[RequestKey: WeakBox<any AnyLiveCollection>]`, purged on access; `query` returns the registered instance when it is still alive, so two screens showing the same query share one `LiveCollection`. `clear()` resets every alive collection to `.idle` with no items and cancels a reload it may be running, so a logout mid-reload cannot bring old data back.
 
-**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. v2 adds a size cap with LRU eviction of request entries and of resources no view observes.
+**Memory.** Entries, and therefore `Live` instances, are retained by the cache, not by views, so a view can hold a `Live<T>` strongly without worrying about ownership. `LiveCollection` holds the store weakly (not `unowned`: a background reload can outlive the store on logout or when a test ends, and must fail with `IonError.cancelled` rather than crash) and the store holds collections weakly, so there is no cycle and a collection dies with its last view. Since v1.6, `maxCachedResources` bounds how many resources stay cached once no view holds them (see Eviction under Cache).
 
 ## Live instances, SwiftUI and concurrency
 
@@ -441,7 +451,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Outcomes are reported through one optional closure, `store.onError(error, request)`, plus an observable `lastTransportError`; once per request, never `.cancelled`, never for accepted statuses (2026-10-17, v1.3) | A 401 from a background revalidation or a `Fetch` had no caller to sign out from; a closure keeps the store free of a delegate protocol, and the request lets apps exempt auth endpoints. The latest-sent request decides "offline", the same rule the request cache uses |
 | `batch` defers only the reloads of alive collections, is store-wide (a depth counter on the main actor, not a task-local) and flushes on throw (2026-10-17, v1.3, [#11](https://github.com/winsmith/ion-kit/issues/11)) | Staleness must stay immediate so a query inside the batch never sees pre-save data; a task-local would miss saves made from task-group children |
 | A DELETE answered with 404 counts as deleted (2026-10-17, v1.3) | JSON:API says a server SHOULD answer 404 for a missing resource; the outcome the user wanted holds, and a retried DELETE becomes safe. A routing bug that answers 404 would also "succeed"; accepted |
-| Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence came in v1.4 through the seam reserved for it (`CacheSnapshot`) |
+| Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence came in v1.4 through the seam reserved for it (`CacheSnapshot`), opt-in eviction in v1.6 |
 | The snapshot is one JSON file written through `Codable`, not SQLite (2026-10-17, v1.4, [#10](https://github.com/winsmith/ion-kit/issues/10)) | Every cached type was already `Codable`; a few thousand resources encode in milliseconds; no dependency and the same code on Linux |
 | Restored documents are always served stale, whatever their age and whatever the policy's hard expiry or the server's expiry say; only one invalidated before the save is expired (2026-10-17, v1.4) | An offline launch days later must still show the last session's data; the first load revalidates it in the background |
 | Restored entries start at mutation sequence 0 (2026-10-17, v1.4) | The store's mutation counter starts at 0 in every process; a restored higher sequence would reject every response until that many mutations happened |
@@ -449,6 +459,9 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Snapshots are saved and loaded explicitly by the app, never automatically (2026-10-17, v1.4) | The app knows its lifecycle (`scenePhase`); a store saving on every response would write constantly |
 | `loadSnapshot()` and `saveSnapshot()` return `Bool` instead of throwing (2026-10-17, v1.4) | Keeps "every throwing store method throws `IonError` only"; the app cannot act on a disk error beyond starting empty |
 | `peek` and `resolve` may serve a restored resource without revalidating it (2026-10-17, v1.4) | They never consult the request cache, as for resources included by an earlier response; the documents that list them revalidate on their first load |
+| Eviction is opt-in, one cap on resources (`maxCachedResources`), least recently used first; held instances, alive collections, the triggering response and resources a pending fetch could revert are never evicted, so the cap is a target (2026-10-17, v1.6) | Resources are what take memory; documents are lists of keys and go with the resources they list. A hard limit would have to drop an instance a view still shows, breaking one `Live<T>` per key |
+| Evicting a resource removes every cached document that lists it (2026-10-17, v1.6) | Materializing skips missing keys, so a kept document would silently show a shorter list; a document is never hotter than its resources, so it was next anyway |
+| The eviction release is 1.6.0, not 2.0 (2026-10-17) | It is additive and off by default; the v2 list stays the backlog, and each item ships as a minor release when it lands |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors. Default rules stay on, with trailing commas required in multi-line collection literals (the style the code already used); short names such as `op` are suppressed at their declaration with a reason, not turned off repo-wide |
@@ -477,7 +490,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -535,7 +548,13 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] The 6.1 workarounds are gone (`findLive`, `queryCollection`, `ResourceCodec.decodeUntyped`); tests catch `.notFound`, `.decoding`, `.transport`, `.invalidDraft` and `.cancelled` by pattern, so a return to plain `throws` does not compile.
 - [x] README and AGENTS.md show `do throws(IonError) { … } catch .cancelled { }`.
 
-**v2 — Depth**: `related(\.key)` observable relationship resolution; LRU eviction with a size cap; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
+**v1.6 — Eviction** (the first item from the v2 list) — done 2026-10-17
+
+- [x] `Store(maxCachedResources:)` and the settable `maxCachedResources`: least-recently-used eviction of resources past the cap, with the documents that list them; `nil` by default.
+- [x] Never evicted: a `Live` held outside the cache, what alive collections list, the response being stored, a resource a pending fetch could revert.
+- [x] `loadSnapshot()` trims to the cap; `resolve` with `.batched` refetches a resource a later batch evicted.
+
+**v2 — Depth**: `related(\.key)` observable relationship resolution; `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
 **v3 — Offline writes**: optional offline write queue built on `Draft` values, persisted next to the cache snapshot (which shipped in v1.4); conflict detection via a `version` attribute.
 
@@ -553,7 +572,7 @@ IonKit/
     WireFormat/    JSONAPIDocument.swift, ResourceObject.swift, ErrorObject.swift, JSONValue.swift, ResourceCodec.swift
     Requests/      Request.swift, RequestHandler.swift, URLSessionHandler.swift, BearerTokenHandler.swift, LoggingHandler.swift, RetryHandler.swift
     Cache/         ResourceCache.swift, RequestCache.swift, CachePolicy.swift
-    Store/         Store.swift, Store+Find.swift, Store+Query.swift, Store+Save.swift, Store+Relationships.swift
+    Store/         Store.swift, Store+Find.swift, Store+Query.swift, Store+Save.swift, Store+Relationships.swift, Store+Snapshot.swift, Store+Eviction.swift
     Reactive/      Live.swift, LiveCollection.swift, Draft.swift, LoadState.swift
     SwiftUI/       Fetch.swift (behind `#if canImport(SwiftUI)`; absent on Linux)
     IonError.swift
@@ -586,31 +605,32 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v1.5, 2026-10-17)
+## Current state of the code (v1.6, 2026-10-17)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as of the v1.5 pull request on 2026-10-17; update it
+signatures are, and what to rely on. It describes the package as of the v1.6 pull request on 2026-10-17; update it
 in the same pull request as any public API change.
 
 **Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page reload,
 ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`,
-DELETE 404 as success), v1.4 (cache snapshot) and v1.5 (typed throws, Swift 6.2 minimum) are implemented in
-`Sources/IonKit` (about 3,600 lines) with `Sources/IonKitTesting` (about 240 lines) and 114 swift-testing tests that
-pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with Xcode 26. Nothing on the v2 / v3 lists exists yet. There is no sample app and the
+DELETE 404 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum) and v1.6 (LRU eviction) are
+implemented in `Sources/IonKit` (about 3,750 lines) with `Sources/IonKitTesting` (about 240 lines) and 124
+swift-testing tests that pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with Xcode 26. Of the
+v2 list only eviction exists; nothing on the v3 list does. There is no sample app and the
 fixtures are synthetic.
 
 **Depending on it.**
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.5.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.6.0"),
 …
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
 Platforms: macOS 15, iOS 18, Linux. Toolchain: Swift 6.2 or later (Xcode 26). Swift 6 language mode with strict
-concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, …) following semantic
+concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, …) following semantic
 versioning; depend on a version range (`from:`) rather than `main`. A release is cut by merging its pull request and tagging the merge commit on `main`.
 
 **Behaviors to rely on.**
@@ -651,6 +671,10 @@ versioning; depend on a version range (`from:`) rather than `main`. A release is
   first load, however old they are; RAM wins over the snapshot; a file from another version or base URL, or one
   that does not decode, is ignored; `clear()` deletes the file. Saving is the app's job (on `scenePhase ==
   .background`, say), and so is the file's protection class.
+- With `maxCachedResources:` the store evicts the least recently used resources past the cap, and every cached
+  document that lists one. A `Live` that anything outside the store holds, whatever an alive collection lists and
+  the response just received are never evicted, so the count can exceed the cap while they are in use. An evicted
+  resource's next load fetches; a `peek` returns nil for it. Without a cap nothing is evicted.
 - `IonError.localizedDescription` is phrased for people; `description` for logs.
 - Resource structs: stored properties are attributes, `ToOne` / `ToMany` properties are relationships, `id` is
   the id. A missing relationship key decodes as `.unloaded`; a missing attribute key is a decoding error unless
@@ -879,8 +903,10 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
     var onError: (@MainActor (IonError, RawRequest) -> Void)?     // v1.3; once per failed request, never .cancelled
     private(set) var lastTransportError: IonError?                // v1.3; observable, latest-sent request wins
     let snapshotURL: URL?                                         // v1.4; nil: RAM only
+    var maxCachedResources: Int?                                  // v1.6; nil: no eviction; lowering it evicts at once
     init(baseURL: URL, handlers: [any RequestHandler] = [URLSessionHandler()],
-         codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy(), snapshotURL: URL? = nil)
+         codec: ResourceCodec = .default, cachePolicy: any CachePolicy = DefaultCachePolicy(), snapshotURL: URL? = nil,
+         maxCachedResources: Int? = nil)
 
     // reads
     // every async throwing method below is `async throws(IonError)` since v1.5
@@ -998,9 +1024,29 @@ extension Store { func seed<T: Resource>(_ values: [T]) }
 ```
 
 **Not there yet** (so do not code against it): `related(\.key)`, token refresh, POST queries served from the cache,
-a batched request format (`batch` coalesces reloads; each save is still its own request), eviction, an offline write queue, client-generated
+a batched request format (`batch` coalesces reloads; each save is still its own request), eviction of documents on
+their own or by size in bytes, an offline write queue, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-17, v1.6)
+
+- **A counter, not dates.** `lastUsed` comes from a counter in `ResourceCache` that advances on every stamp, so the
+  order is exact even within one response, and the pass compares it against the counter's value when the
+  triggering operation started (`evictIfNeeded(keepingUsedAfter:)`) to keep that operation's resources.
+- **"Held" without weak references.** `Entry.live` became a computed view over `instance: AnyObject?`:
+  `isKnownUniquelyReferenced` does not accept a protocol existential (`any AnyLiveResource`; "no exact matches" on
+  6.2), but accepts `AnyObject?` in place through the dictionary's modify accessor, which adds no reference.
+- **Pending fetches, not in-flight GETs.** The first idea was to protect a mutated entry while `inflight` lists an
+  older GET, but `sharedGET` removes its entry before the response is decoded and ingested, and decoding leaves
+  the main actor. `fetch` now registers its start sequence in `pendingFetches` for its whole run.
+- **Why collections protect more than their items.** Items already hold their instances; what the alive-collection
+  rule adds is the first page's *included* resources, whose eviction would remove the collection's cached document
+  and make the next `query` wait for the network.
+- **`resolve` with `.batched`** used to look up every batch's resources after the last batch; with a small cap a
+  later batch could evict an earlier one, so a missing one is fetched again instead of throwing `.notFound`.
+- **Verified.** Each protection was disabled in turn and a test failed for each. Built and tested in the `swift:6.2`
+  (debug and release) and `swift:6.4` containers; SwiftLint 0.59.1 reports no new warnings.
 
 ## Implementation notes (2026-10-17, v1.5)
 

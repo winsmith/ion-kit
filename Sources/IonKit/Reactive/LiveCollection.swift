@@ -5,6 +5,9 @@ import Observation
 @MainActor
 protocol AnyLiveCollection: AnyObject {
     var resourceType: String { get }
+    var key: RequestKey { get }
+    /// The primary keys of every loaded page; eviction keeps them.
+    var loadedKeys: [ResourceKey] { get }
     var autoRefresh: Bool { get }
     func remove(_ key: ResourceKey)
     func apply(_ document: CachedDocument)
@@ -48,6 +51,8 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     @ObservationIgnored private var generation = 0
 
     nonisolated public var resourceType: String { T.resourceType }
+
+    var loadedKeys: [ResourceKey] { pages.flatMap { $0 } }
 
     init(store: Store, key: RequestKey, request: Request<JSONAPIDocument>) {
         self.store = store

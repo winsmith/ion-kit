@@ -53,6 +53,7 @@ extension Store {
 
         mutationCounter += 1
         let sequence = mutationCounter
+        let start = resources.clock
         resources.upsert(object, typed: value, codec: codec, startSequence: sequence)
         resources.bump(key, sequence: sequence)
         for other in fetched.document.allObjects where other.key != key {
@@ -61,6 +62,7 @@ extension Store {
         let live = try liveResource(for: key, as: T.self)
         draft.markSaved(id: key.id)
         invalidate(type: T.resourceType)
+        evictIfNeeded(keepingUsedAfter: start)
         return live
     }
 
@@ -81,6 +83,7 @@ extension Store {
 
         mutationCounter += 1
         let sequence = mutationCounter
+        let start = resources.clock
         for object in fetched.document.allObjects where object.key != key {
             resources.upsert(object, codec: codec, startSequence: sequence)
         }
@@ -89,6 +92,7 @@ extension Store {
             collection.remove(key)
         }
         invalidate(type: T.resourceType)
+        evictIfNeeded(keepingUsedAfter: start)
     }
 
     // MARK: Helpers

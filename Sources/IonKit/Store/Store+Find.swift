@@ -52,6 +52,7 @@ extension Store {
         guard let raw = try? RawRequest(request, baseURL: baseURL) else { return nil }
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
         guard let entry = requests[key], state(of: entry) != .expired else { return nil }
+        resources.touch(entry.allKeys)
         return entry
     }
 
