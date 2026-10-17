@@ -179,29 +179,7 @@ public final class Store {
         }
         var fetched: Fetched
         if request.method == .get {
-            let flight: InFlight
-            var owned = false
-            if let existing = inflight[key], canJoin(existing, key: key) {
-                flight = existing
-            } else {
-                let chain = self.chain
-                let conditional = raw
-                let sentAt = Date()
-                let task = Task.detached { try await Store.perform(conditional, chain: chain, sentAt: sentAt) }
-                flight = InFlight(task: task, startedAt: sentAt, startSequence: startSequence)
-                inflight[key] = flight
-                owned = true
-            }
-            defer { if owned, inflight[key]?.task == flight.task { inflight[key] = nil } }
-            do {
-                fetched = try await flight.task.value
-                if owned { record(nil, for: raw, sentAt: flight.startedAt) }
-            } catch {
-                let error = IonError(error)
-                if owned { record(error, for: raw, sentAt: flight.startedAt) }
-                throw error
-            }
-            if Task.isCancelled { throw IonError.cancelled }
+            fetched = try await sharedGET(raw, key: key, startSequence: startSequence)
         } else {
             fetched = try await send(raw)
         }
@@ -219,6 +197,35 @@ public final class Store {
         }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
         return ingest(fetched, typed: typed, request: request, key: key, startSequence: startSequence)
+    }
+
+    /// Sends a GET, or joins the in-flight one for the key when `canJoin` allows it. Only the caller that started
+    /// the request records its outcome and removes it from `inflight`.
+    private func sharedGET(_ raw: RawRequest, key: RequestKey, startSequence: Int) async throws -> Fetched {
+        let flight: InFlight
+        var owned = false
+        if let existing = inflight[key], canJoin(existing, key: key) {
+            flight = existing
+        } else {
+            let chain = self.chain
+            let sentAt = Date()
+            let task = Task.detached { try await Store.perform(raw, chain: chain, sentAt: sentAt) }
+            flight = InFlight(task: task, startedAt: sentAt, startSequence: startSequence)
+            inflight[key] = flight
+            owned = true
+        }
+        defer { if owned, inflight[key]?.task == flight.task { inflight[key] = nil } }
+        let fetched: Fetched
+        do {
+            fetched = try await flight.task.value
+            if owned { record(nil, for: raw, sentAt: flight.startedAt) }
+        } catch {
+            let error = IonError(error)
+            if owned { record(error, for: raw, sentAt: flight.startedAt) }
+            throw error
+        }
+        if Task.isCancelled { throw IonError.cancelled }
+        return fetched
     }
 
     /// Whether a caller may adopt an in-flight GET instead of starting its own.

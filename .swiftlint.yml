@@ -1,0 +1,22 @@
+# SwiftLint configuration for IonKit. CI runs `swiftlint lint` with this file; run the same locally before pushing.
+
+opt_in_rules:
+  - empty_count
+
+included:
+  - Package.swift
+  - Sources
+  - Tests
+excluded:
+  - .build
+
+trailing_comma:
+  mandatory_comma: true # multi-line collection literals end with a comma
+force_try: warning # IonKitTesting crashes on purpose when a fixture fails to encode
+line_length: 200
+type_body_length:
+  warning: 400
+  error: 600
+file_length:
+  warning: 600
+  error: 1000

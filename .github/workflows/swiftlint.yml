@@ -1,0 +1,15 @@
+name: SwiftLint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  swiftlint:
+    name: SwiftLint
+    runs-on: ubuntu-latest
+    container: ghcr.io/realm/swiftlint:0.59.1
+    steps:
+      - uses: actions/checkout@v4
+      - run: swiftlint version
+      - run: swiftlint lint --reporter github-actions-logging
