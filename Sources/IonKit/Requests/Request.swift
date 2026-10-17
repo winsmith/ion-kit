@@ -49,6 +49,7 @@ public struct Request<Response: Decodable & Sendable>: Sendable {
     public var query: [URLQueryItem]
     public var headers: [String: String]
     public var body: Data?
+    // swiftlint:disable:next identifier_name - public API; renaming `op` would break consumers
     public var op: Operation
     /// Primary resources of a mutation.
     public var records: [ResourceKey]
@@ -56,6 +57,7 @@ public struct Request<Response: Decodable & Sendable>: Sendable {
 
     public init(
         method: HTTPMethod, path: String, query: [URLQueryItem] = [], headers: [String: String] = [:],
+        // swiftlint:disable:next identifier_name - matches the `op` property
         body: Data? = nil, op: Operation = .custom, records: [ResourceKey] = [], cache: CacheOptions = .default
     ) {
         self.method = method

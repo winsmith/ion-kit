@@ -263,8 +263,10 @@ struct StoreErgonomicsTests {
         let store = Store(baseURL: MockHandler.defaultBaseURL, handlers: [slow])
         slow.respond(to: "GET people", with: [Person(id: "1", name: "Ann")])
         let collection = try await store.query(Person.self)
+        // swiftlint:disable identifier_name - `a` and `b` are the two concurrent reloads
         async let a: Void = collection.reload()
         async let b: Void = collection.reload()
+        // swiftlint:enable identifier_name
         try await Task.sleep(for: .milliseconds(5))
         #expect(collection.isReloading)
         _ = try await (a, b)
@@ -294,6 +296,7 @@ struct StoreErgonomicsTests {
 
     @Test func findByRequest() async throws {
         mock.respond(to: "GET me", with: Person(id: "7", name: "Me"))
+        // swiftlint:disable:next identifier_name - mirrors the `me` endpoint
         let me = try await store.find(Person.self, request: Request(method: .get, path: "me", op: .find))
         #expect(me.id == "7")
         #expect(store.cachedLive(Person.self, request: Request(method: .get, path: "me", op: .find)) === me)
@@ -319,8 +322,10 @@ struct StoreErgonomicsTests {
     }
 
     @Test func requestsAreHashable() throws {
+        // swiftlint:disable identifier_name - `a` and `b` are the two instances being compared
         let a = Request<JSONAPIDocument>.find(Person.self, id: "1", include: ["tags"])
         let b = Request<JSONAPIDocument>.find(Person.self, id: "1", include: ["tags"])
+        // swiftlint:enable identifier_name
         #expect(a == b)
         #expect(a.hashValue == b.hashValue)
         #expect(a != Request<JSONAPIDocument>.find(Person.self, id: "1"))

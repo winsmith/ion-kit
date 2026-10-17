@@ -18,7 +18,10 @@ docker run --rm -v $PWD:/src -w /src ghcr.io/realm/swiftlint:0.59.1 swiftlint   
 ```
 
 Run `swiftlint` locally before every push; the SwiftLint workflow fails on errors and annotates warnings. Fix
-new warnings rather than adding them; `// swiftlint:disable:next <rule>` needs a reason in the same comment.
+new warnings rather than adding them. Default rules stay on; multi-line collection literals end with a trailing
+comma. Suppress a rule only at the declaration that needs it, with a reason after ` - `:
+`// swiftlint:disable:next identifier_name - mirrors the "ok" key in the response`. Prefer splitting a function
+over suppressing `cyclomatic_complexity`.
 
 Tests use swift-testing and `IonKitTesting.MockHandler`; nothing touches the network.
 

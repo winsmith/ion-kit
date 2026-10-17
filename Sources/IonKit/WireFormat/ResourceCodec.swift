@@ -85,13 +85,11 @@ public struct ResourceCodec: Sendable {
             do {
                 return try decoder.decode(T.self, from: try JSONEncoder().encode(JSONValue.object(merged)))
             } catch DecodingError.keyNotFound(let key, let context)
-                where context.codingPath.isEmpty && injected[key.stringValue] == nil && injected.count < 64
-            {
+                where context.codingPath.isEmpty && injected[key.stringValue] == nil && injected.count < 64 {
                 injected[key.stringValue] = DecodingError.keyNotFound(key, context)
                 merged[key.stringValue] = .object([:])
             } catch DecodingError.typeMismatch(_, let context)
-                where context.codingPath.count == 1 && injected[context.codingPath[0].stringValue] != nil
-            {
+                where context.codingPath.count == 1 && injected[context.codingPath[0].stringValue] != nil {
                 throw injected[context.codingPath[0].stringValue]!
             }
         }

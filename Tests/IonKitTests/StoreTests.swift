@@ -140,8 +140,10 @@ struct StoreReadTests {
 
     @Test func sameQuerySharesOneCollection() async throws {
         mock.respond(to: "GET people?filter[name]=Ann&sort=name", with: [Person(id: "1", name: "Ann")])
+        // swiftlint:disable identifier_name - `a` and `b` are the two instances being compared
         let a = try await store.query(Person.self, filter: ["name": "Ann"], sort: ["name"])
         let b = try await store.query(Person.self, filter: ["name": "Ann"], sort: ["name"], include: [])
+        // swiftlint:enable identifier_name
         #expect(a === b)
         #expect(mock.requests.count == 1)
     }
@@ -172,6 +174,7 @@ struct StoreReadTests {
         slow.respond(to: "GET people/1", with: Person(id: "1", name: "Ann"))
         async let first = store.find(Person.self, id: "1")
         async let second = store.find(Person.self, id: "1")
+        // swiftlint:disable:next identifier_name - `a` and `b` are the two instances being compared
         let (a, b) = try await (first, second)
         #expect(a === b)
         #expect(slow.requests.count == 1)
@@ -271,6 +274,7 @@ struct StoreReadTests {
         #expect(document.data?.objects.map(\.id) == ["7"])
         #expect(store.peek(Tag.self, id: "7")?.value.name == "x")
 
+        // swiftlint:disable:next identifier_name - mirrors the `ok` key in the response
         struct Status: Decodable { let ok: Bool }
         mock.respond(to: "GET status", with: RawResponse(status: 200, data: Data(#"{"ok": true}"#.utf8)))
         let status: Status = try await store.request(Request<Status>(method: .get, path: "status"))

@@ -9,6 +9,7 @@ public struct CachedDocument: Sendable {
     public var isCollection: Bool
     public var links: Links
     public var meta: [String: JSONValue]?
+    // swiftlint:disable:next identifier_name - public API; renaming `op` would break consumers
     public var op: Operation
     public var receivedAt: Date
     public var invalidatedAt: Date?
@@ -21,6 +22,7 @@ public struct CachedDocument: Sendable {
 
     public init(
         primary: [ResourceKey], included: [ResourceKey] = [], isCollection: Bool, links: Links = Links(),
+        // swiftlint:disable:next identifier_name - matches the `op` property
         meta: [String: JSONValue]? = nil, op: Operation = .custom, receivedAt: Date = Date(), invalidatedAt: Date? = nil,
         types: Set<String>? = nil, serverExpiry: Date? = nil, etag: String? = nil
     ) {
