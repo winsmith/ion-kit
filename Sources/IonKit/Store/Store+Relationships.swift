@@ -24,10 +24,10 @@ extension Store {
     }
 
     /// The live instance of a to-one relationship, fetching it when it is not cached.
-    public func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws -> Live<T>? {
+    public func resolve<T: Resource>(_ relationship: ToOne<T>, cache: CacheOptions = .default) async throws(IonError) -> Live<T>? {
         guard let key = relationship.key else { return nil }
         if !cache.reload, let live = peek(T.self, key: key) { return live }
-        return try await findLive(T.self, id: key.id, cache: cache)
+        return try await find(T.self, id: key.id, cache: cache)
     }
 
     /// The live instances of a to-many relationship, in id order, fetching the ids that are not cached (all of
@@ -36,7 +36,7 @@ extension Store {
     /// Usage: `let tags = try await store.resolve(person.value.tags)`
     public func resolve<T: Resource>(
         _ relationship: ToMany<T>, cache: CacheOptions = .default, strategy: ResolveStrategy? = nil
-    ) async throws -> [Live<T>] {
+    ) async throws(IonError) -> [Live<T>] {
         let keys = relationship.keys
         var missing: [String] = []
         for key in keys where cache.reload || peek(T.self, key: key) == nil {
@@ -64,7 +64,7 @@ extension Store {
             } else if !cache.reload, let live = peek(T.self, key: key) {
                 result.append(live)
             } else {
-                let live = try await findLive(T.self, id: key.id, cache: cache)
+                let live = try await find(T.self, id: key.id, cache: cache)
                 result.append(live)
             }
         }

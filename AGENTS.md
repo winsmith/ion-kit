@@ -12,7 +12,7 @@ request as the code.
 swift build
 swift test
 swift build -c release
-docker run --rm -v $PWD:/src -w /src swift:6.1 swift test   # Linux, what CI runs
+docker run --rm -v $PWD:/src -w /src swift:6.2 swift test   # Linux, the minimum; CI also runs swift:6.4
 swiftlint                                                    # brew install swiftlint; config in .swiftlint.yml
 docker run --rm -v $PWD:/src -w /src ghcr.io/realm/swiftlint:0.59.1 swiftlint   # the version CI runs
 ```
@@ -54,19 +54,14 @@ Tests/IonKitTests/       one file per source folder; fixtures under Resources/ (
 - No new dependencies without a line in the design document's decisions table.
 - Prefer deleting over abstracting: a feature not in the current milestone is a separate PR, not a hook.
 
-## Known toolchain issue: typed throws
+## Toolchain and typed throws
 
-The design calls for `async throws(IonError)` on store methods. Swift 6.1 (the toolchain in `swift:6.1` and
-Xcode 16.3/16.4) crashes in IRGen at `-Onone` whenever a generic async function with typed throws returns a type
-that depends on `T` (`Live<T>`, `LiveCollection<T>`, `[ResourceKey: T]`) and the caller uses the result. Release
-builds are unaffected. The package itself builds and tests green on `swift:6.2` in CI, but whether 6.2 fixes the
-typed-throws crash is not verified yet (issue #1). Until the minimum toolchain is one that compiles it, async
-store and collection
-methods use plain `throws` and are documented to throw `IonError` only; synchronous codec methods keep typed
-throws. `catch IonError.cancelled` works everywhere. Once the toolchain allows it, restore `throws(IonError)` on
-`find`, `query`, `resolve`, `save`, `delete`, `request`, `reload`, `loadMore` and the internal `load`/`fetch`
-path. A minimal reproducer: a generic `func b<T: P>(_: T.Type) async throws(E) -> C<T>` called with
-`let c = try await s.b(X.self); _ = c.v` crashes `swiftc -Onone` 6.1.3.
+The minimum toolchain is Swift 6.2 (Xcode 26; `swift-tools-version: 6.2`). Swift 6.1 crashed in IRGen at `-Onone`
+on generic async functions with typed throws, which kept the store API on plain `throws` until v1.5 (issue #1).
+Every async method on `Store` and `LiveCollection` is now `async throws(IonError)`; keep it that way, and convert
+`any Error` with `IonError(_:)` only where it enters: the handler chain, `Task.value`, `JSONEncoder` / `JSONDecoder`.
+Inside a closure (a `Task { }`, SwiftUI's `.task`) Swift 6.2–6.4 do not infer a `do` block's error type: write
+`do throws(IonError) { … } catch .cancelled { … }` there.
 
 ## Releasing
 
@@ -78,7 +73,7 @@ raise their `from:` requirement and re-resolve; Village does that in its own pul
 
 ## Definition of done
 
-- `swift build` and `swift test` pass on macOS and in the `swift:6.1` container.
+- `swift build` and `swift test` pass on macOS (Xcode 26) and in the `swift:6.2` container.
 - `swiftlint` reports no errors and no new warnings.
 - New behavior has a test against `MockHandler`, not the network.
 - Public API changes are reflected in `docs/ARCHITECTURE.md` and, if usage changes, in the README.

@@ -151,7 +151,7 @@ struct StoreErgonomicsTests {
         do {
             _ = try await store.find(Person.self, id: "2")
             Issue.record("expected 429")
-        } catch let error as IonError {
+        } catch {
             #expect(error.status == 429)
         }
         #expect(mock.requests(for: "GET people/2").count == 1, "a Retry-After beyond maxDelay is not waited for")
@@ -305,7 +305,7 @@ struct StoreErgonomicsTests {
         do {
             _ = try await store.find(Person.self, request: Request(method: .get, path: "nobody"))
             Issue.record("expected notFound")
-        } catch let error as IonError {
+        } catch {
             #expect(error.isNotFound)
         }
 
@@ -313,7 +313,7 @@ struct StoreErgonomicsTests {
         do {
             _ = try await store.find(Person.self, request: Request(method: .get, path: "people"))
             Issue.record("expected decoding")
-        } catch let error as IonError {
+        } catch {
             guard case .decoding = error else {
                 Issue.record("expected decoding, got \(error)")
                 return

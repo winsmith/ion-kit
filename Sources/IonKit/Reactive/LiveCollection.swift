@@ -58,17 +58,21 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     /// Refetches every loaded page from the network and replaces `items` once all of them arrived; until then the
     /// previous result stays on screen. Concurrent reloads are coalesced into one. A failed page leaves the
     /// collection as it was and throws.
-    public func reload() async throws {
+    ///
+    /// Usage: `.refreshable { try? await people.reload() }`
+    public func reload() async throws(IonError) {
         try await reload(allPages: true)
     }
 
     /// Fetches `links.next` and appends its items. Does nothing without a next link; waits for a running reload.
-    public func loadMore() async throws {
+    ///
+    /// Usage: `.onAppear { if live === people.items.last { Task { try? await people.loadMore() } } }`
+    public func loadMore() async throws(IonError) {
         if let running = reloadTask {
             _ = try? await running.value
         }
         guard let next = links.next else { return }
-        guard let store else { throw IonError.cancelled }
+        guard let store else { throw .cancelled }
         let generation = self.generation
         var pageRequest = request
         pageRequest.path = next.href
@@ -84,12 +88,12 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
     // MARK: Internal
 
     /// Loads the first page, from the cache when the policy allows; `reload` refetches every loaded page.
-    func load(reload: Bool) async throws {
+    func load(reload: Bool) async throws(IonError) {
         if reload {
             try await self.reload(allPages: true)
             return
         }
-        guard let store else { throw IonError.cancelled }
+        guard let store else { throw .cancelled }
         if pages.isEmpty, !state.isLoaded { state = .loading }
         let generation = self.generation
         do {
@@ -101,14 +105,18 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
         }
     }
 
-    private func reload(allPages: Bool) async throws {
+    private func reload(allPages: Bool) async throws(IonError) {
         if let running = reloadTask {
             reloadAgain = true
             reloadAgainAllPages = reloadAgainAllPages || allPages
-            try await running.value
+            do {
+                try await running.value
+            } catch {
+                throw IonError(error)
+            }
             return
         }
-        guard store != nil else { throw IonError.cancelled }
+        guard store != nil else { throw .cancelled }
         if pages.isEmpty, !state.isLoaded { state = .loading }
         let generation = self.generation
         isReloading = true
@@ -140,13 +148,13 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
         do {
             try await task.value
         } catch {
-            try fail(with: error, generation: generation)
+            try fail(with: IonError(error), generation: generation)   // `Task` has no typed failure
         }
     }
 
     /// One pass: the first page with `reload`, then as many `next` pages as were loaded before (when `allPages`).
-    private func runReload(allPages: Bool) async throws {
-        guard let store else { throw IonError.cancelled }
+    private func runReload(allPages: Bool) async throws(IonError) {
+        guard let store else { throw .cancelled }
         let generation = self.generation
         let count = allPages ? max(pages.count, 1) : 1
         var first = request
@@ -242,13 +250,12 @@ public final class LiveCollection<T: Resource>: AnyLiveCollection {
         Task { try? await reload(allPages: false) }
     }
 
-    private func checkAlive(_ generation: Int) throws {
-        guard generation == self.generation, store != nil else { throw IonError.cancelled }
+    private func checkAlive(_ generation: Int) throws(IonError) {
+        guard generation == self.generation, store != nil else { throw .cancelled }
     }
 
-    /// Records a failed load in `state` when nothing is on screen, then rethrows as `IonError`.
-    private func fail(with error: any Error, generation: Int) throws {
-        let error = IonError(error)
+    /// Records a failed load in `state` when nothing is on screen, then rethrows it.
+    private func fail(with error: IonError, generation: Int) throws(IonError) {
         if generation == self.generation, items.isEmpty {
             if case .cancelled = error {
                 state = .idle

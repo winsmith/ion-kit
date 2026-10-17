@@ -18,9 +18,11 @@ truth for the package.
 
 ## Installing
 
+IonKit needs Swift 6.2 or later (Xcode 26 on Apple platforms) and runs on macOS 15, iOS 18 and Linux.
+
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.4.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.5.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -107,9 +109,12 @@ struct PersonView: View {
             else { ProgressView() }
         }
         .task(id: id) {
-            do { person = try await store.find(Person.self, id: id, include: ["tags"]) }
-            catch IonError.cancelled { }                      // the view went away; show nothing
-            catch { self.error = error as? IonError }
+            do throws(IonError) {
+                person = try await store.find(Person.self, id: id, include: ["tags"])
+            } catch .cancelled {                              // the view went away; show nothing
+            } catch {
+                self.error = error                            // already an IonError
+            }
         }
     }
 }
@@ -192,9 +197,12 @@ inside the closure belong to the batch.
 
 ## Errors
 
-Every store method throws `IonError` only: `.transport`, `.http(status:errors:)`, `.notFound`, `.decoding`,
-`.invalidDraft` and `.cancelled`. `error.localizedDescription` is phrased for people ("You appear to be offline."),
-`error.description` for logs.
+Every async method on `Store` and `LiveCollection` uses typed throws, `throws(IonError)`: `.transport`,
+`.http(status:errors:)`, `.notFound`, `.decoding`, `.invalidDraft` and `.cancelled`. In a function body a `catch`
+receives an `IonError` and `catch .cancelled { }` works as is. Inside a closure, such as SwiftUI's `.task`, Swift
+does not infer a `do` block's error type, so write `do throws(IonError) { … }` there, as in the example above;
+`catch IonError.cancelled` works everywhere. `error.localizedDescription` is phrased for people ("You appear to be
+offline."), `error.description` for logs.
 
 ### Signing out on 401 and showing "offline"
 
@@ -233,15 +241,15 @@ mock.respond(to: "GET people/42", throwing: URLError(.timedOut))   // a transpor
 ```sh
 swift build
 swift test
-docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
+docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux, the minimum toolchain
 ```
 
 ## Status
 
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
 `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
-as success) and v1.4 (cache snapshot) are implemented and tested against `MockHandler`. Releases are git tags;
-depend on `from: "1.4.0"`. See the milestone list in
+as success), v1.4 (cache snapshot) and v1.5 (typed throws, Swift 6.2 minimum) are implemented and tested against
+`MockHandler`. Releases are git tags; depend on `from: "1.5.0"`. See the milestone list in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
