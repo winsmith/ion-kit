@@ -490,7 +490,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅<br/>(Village gate open)"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅<br/>(Village gate open)"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -509,11 +509,11 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] Resource cache with raw entries, lazy typed decode, upsert of primary + included, tombstones; request cache; `DefaultCachePolicy` with `Cache-Control` / `Expires` support; in-flight dedupe and `mutationSequence`; `invalidate(type:)`, `clear()`.
 - [x] Gate: an integration test in `IonKitTests/StoreTests` reads a list and a detail through `MockHandler`; the Village read-only screens are the demo, not the gate.
 
-**v0.3 = v1.0 — Writes** — package side done 2026-10-15; the Village gate is open ([issue #5](https://github.com/winsmith/ion-kit/issues/5))
+**v0.3 = v1.0 — Writes** — package side done 2026-10-15; Village gate done 2026-10-17 ([issue #5](https://github.com/winsmith/ion-kit/issues/5))
 
 - [x] `Draft<T>`, `store.save(&draft)` (POST / PATCH with diff), `store.delete`; server-assigned ids with local placeholders; `IonError.invalidDraft`.
 - [x] The invalidation rules table, `LiveCollection.autoRefresh`, immediate local removal on delete; `IonError.http.errors(forAttribute:)`.
-- [ ] Village creates, edits and deletes people, notes and tags through IonKit; README with the examples from this document (README done).
+- [x] Village creates, edits and deletes people, their notes and their relationships through IonKit (`Draft` + `store.save` / `store.delete` in its list, person and relationship screens; notes are a markdown attribute of a person); README with the examples from this document (the gate; Village PRs 2 and 10, the markdown notes editor in 10, 2026-10-17). Tags are not part of the gate: Village decodes `tags` but has no screen that writes them yet.
 
 **v1.1 — Ergonomics** (the v1.x list, [issue #6](https://github.com/winsmith/ion-kit/issues/6)) — package side done 2026-10-16
 
@@ -527,19 +527,19 @@ Each band is a milestone in order; the gate on the right is what must be true be
 
 **v1.2 — Fixes from the Village app** — done 2026-10-17: `URLSessionHandler` bypasses `URLCache`; `Fetch` keeps its load alive across a spurious `onDisappear` (see the v1.1 implementation notes).
 
-**v1.3 — Outcomes and batches** (what Village's MVP needed next) — package side done 2026-10-17
+**v1.3 — Outcomes and batches** (what Village's MVP needed next) — done 2026-10-17
 
 - [x] `store.onError(error, request)` and the observable `store.lastTransportError`, reported once per request from every path (foreground, background revalidation, collection reloads, `Fetch`, non-document requests).
 - [x] `store.batch { }`: alive collections reload once per batch instead of once per save ([issue #11](https://github.com/winsmith/ion-kit/issues/11)).
 - [x] `delete` treats a 404 as success.
-- [ ] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate).
+- [x] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate; Village PR 9, 2026-10-17).
 
 **v1.4 — Persistence** (the cache snapshot from v3, [issue #10](https://github.com/winsmith/ion-kit/issues/10)) — package side done 2026-10-17
 
 - [x] `CacheSnapshot` and `Store(snapshotURL:)`: `saveSnapshot()` writes the resource cache (raw entries, tombstones) and the request cache atomically, off the main actor; `loadSnapshot()` restores both before the first request.
 - [x] Restored documents are served stale whatever their age and revalidate on their first load; one invalidated before the save is expired; RAM wins over the snapshot.
 - [x] A missing, corrupt, other-version or other-base-URL file is discarded silently; `clear()` deletes the file and overtakes a load in progress; a restored entry that no longer decodes is fetched again.
-- [ ] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate).
+- [ ] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate; in review as Village PR 19).
 
 **v1.5 — Typed throws** ([issue #1](https://github.com/winsmith/ion-kit/issues/1)) — done 2026-10-17
 
