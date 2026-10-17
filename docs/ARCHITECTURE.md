@@ -516,6 +516,49 @@ IonKit/
 - Prefer deleting over abstracting: a feature not listed under the current milestone is a separate PR with a note in the milestone list, not a hook "for later".
 - Keep the wire format honest: fixtures in `Tests/.../Resources` are real responses captured from the Village server, re-captured when the server changes. Until captured ones exist, hand-written fixtures are allowed if the file name ends in `.synthetic.json`; v0.1 needs at least `person-single.json` (with `included` tags, a `Date` attribute, a `null` to-one and an empty to-many), `people-collection.json` (with `links.next`), `error-422.json` and an empty 204 response.
 
+**Test people and connections**
+
+When a test or a synthetic fixture needs people and the connections between them, take them from Brandon Sanderson's
+*The Stormlight Archive* instead of inventing `Ann`, `Bob` and `P1`. The cast is large, already organized into
+families and groups, and has the awkward cases a contacts graph has to survive: people known by several names, people
+with one name only, marriages between families, step-relations, estrangements and the dead. A reader who knows the
+books can tell at a glance whether `Adolin → Shallan: spouse` is right, which a random name cannot offer. Existing
+tests keep their names; new ones and rewritten ones use the cast below. Pick the smallest group that covers the case
+(House Kholin for family trees, Bridge Four for a flat group of friends, the Davars for siblings), and keep spren out
+of `person` resources unless a test is specifically about non-human contacts.
+
+| Person | Group | Connections | Useful for |
+| --- | --- | --- | --- |
+| Kaladin Stormblessed | Bridge Four, Hearthstone | son of Lirin and Hesina; brother of Tien and Oroden; friend of Teft, Rock, Sigzil, Lopen, Rlain; former friend of Moash; bonded to Syl | the default person; an epithet as a last name |
+| Lirin | Hearthstone | married to Hesina; father of Kaladin, Tien and Oroden | parent with a strained relation to a child |
+| Hesina | Hearthstone | married to Lirin; mother of Kaladin, Tien and Oroden | |
+| Tien | Hearthstone | Kaladin's younger brother; deceased | a deceased contact, tombstones |
+| Oroden | Hearthstone | Kaladin's infant brother | a very young contact |
+| Teft | Bridge Four | friend of Kaladin; Windrunner | one-word name |
+| Rock (Lunamor) | Bridge Four | friend of Kaladin; Horneater cook | nickname vs. full name |
+| Sigzil | Bridge Four | friend of Kaladin; the crew's scholar | |
+| Lopen | Bridge Four | friend of Kaladin; Herdazian with a very large family | contact with many unnamed relatives |
+| Rlain | Bridge Four | friend of Kaladin and Renarin; a listener | member of two groups |
+| Moash | Bridge Four (left) | former friend of Kaladin; killed Elhokar | a removed or estranged connection |
+| Dalinar Kholin | House Kholin | brother of Gavilar; widower of Evi; married to Navani; father of Adolin and Renarin; uncle of Jasnah and Elhokar | the root of a family tree |
+| Navani Kholin | House Kholin | widow of Gavilar; married to Dalinar; mother of Jasnah and Elhokar; stepmother of Adolin and Renarin | remarriage, step-relations |
+| Gavilar Kholin | House Kholin | brother of Dalinar; first husband of Navani; father of Jasnah and Elhokar; deceased | |
+| Evi | House Kholin | Dalinar's first wife; mother of Adolin and Renarin; deceased | |
+| Adolin Kholin | House Kholin | son of Dalinar and Evi; brother of Renarin; cousin of Jasnah and Elhokar; married to Shallan | a link between two families |
+| Renarin Kholin | House Kholin | son of Dalinar and Evi; brother of Adolin; friend of Rlain | |
+| Jasnah Kholin | House Kholin | daughter of Gavilar and Navani; sister of Elhokar; Shallan's mentor | a non-family "mentor" connection |
+| Elhokar Kholin | House Kholin | son of Gavilar and Navani; father of Gavinor; deceased | |
+| Gavinor Kholin | House Kholin | son of Elhokar | three generations below Gavilar |
+| Shallan Davar | House Davar, House Kholin | married to Adolin; sister of Helaran, Balat, Wikim and Jushu; ward of Jasnah; also goes by Veil and Radiant; bonded to Pattern | one person with several names, a person in two families |
+| Helaran Davar | House Davar | Shallan's eldest brother; deceased | |
+| Balat, Wikim, Jushu Davar | House Davar | Shallan's brothers | a batch of siblings, `batch` tests |
+| Lift | Azir | friend of Gawx; bonded to Wyndle | one-word name, a child |
+| Gawx (Yanagawn) | Azir | friend of Lift; Prime Aqasix of Azir | a title instead of a family name |
+| Venli | Listeners | sister of Eshonai | |
+| Eshonai | Listeners | sister of Venli | |
+| Szeth | none | Skybreaker; travels with Nin | a contact with no group |
+| Wit (Hoid) | none | knows nearly everyone; close to Jasnah; taught Shallan | a contact connected to every group, several names |
+
 **Definition of done for a task**
 
 1. `swift build` and `swift test` pass on macOS and in the `swift:6.1` Linux container (`docker run --rm -v $PWD:/src -w /src swift:6.1 swift test`); CI also runs `swift:6.2`.
