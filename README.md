@@ -22,7 +22,7 @@ IonKit needs Swift 6.2 or later (Xcode 26 on Apple platforms) and runs on macOS 
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.5.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.6.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -158,6 +158,21 @@ methods return `false` instead of throwing. `store.clear()` deletes the file. En
 write run off the main actor. IonKit only takes a URL: where the file lives and its file protection are the app's
 choice (on iOS a new file gets the app's default protection class).
 
+### Capping the cache
+
+By default the store keeps every resource it has seen for as long as it lives. For a long session over a large
+API, cap it:
+
+```swift
+let store = Store(baseURL: url, handlers: […], maxCachedResources: 2_000)
+```
+
+Past the cap the least recently used resources are evicted, together with every cached document that lists them,
+so their next load fetches again. Anything in use stays: a `Live` a view or variable holds, whatever an alive
+`LiveCollection` lists, and the response just received. The cap is therefore a target, and the store can hold more
+while that much is on screen. Lowering `store.maxCachedResources` evicts at once; a snapshot loaded into a capped
+store is trimmed to it.
+
 ## Editing
 
 ```swift
@@ -248,8 +263,8 @@ docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux, the minim
 
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
 `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
-as success), v1.4 (cache snapshot) and v1.5 (typed throws, Swift 6.2 minimum) are implemented and tested against
-`MockHandler`. Releases are git tags; depend on `from: "1.5.0"`. See the milestone list in
+as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum) and v1.6 (LRU eviction) are implemented
+and tested against `MockHandler`. Releases are git tags; depend on `from: "1.6.0"`. See the milestone list in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License

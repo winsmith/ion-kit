@@ -33,7 +33,7 @@ Sources/IonKit/
   WireFormat/    JSONValue, JSONAPIDocument, ResourceObject, ErrorObject, Links, ResourceCodec
   Requests/      Request, RawRequest, RawResponse, RequestHandler, URLSessionHandler, BearerTokenHandler, LoggingHandler, RetryHandler
   Cache/         ResourceCache (identity map), RequestCache, CachePolicy, CacheSnapshot (the snapshot file format)
-  Store/         Store, Store+Find, Store+Query, Store+Save, Store+Relationships, Store+Snapshot
+  Store/         Store, Store+Find, Store+Query, Store+Save, Store+Relationships, Store+Snapshot, Store+Eviction
   Reactive/      Live, LiveCollection, Draft, LoadState
   SwiftUI/       Fetch, FetchFailureView (behind `#if canImport(SwiftUI)`; not built on Linux, so CI's macOS job is
                  the only one that compiles it)

@@ -31,6 +31,16 @@ public final class Store {
     public private(set) var lastTransportError: IonError?
     /// Where `saveSnapshot()` writes the caches and `loadSnapshot()` reads them; nil keeps the store RAM only.
     public let snapshotURL: URL?
+    /// The most resources (tombstones included) the store keeps; nil, the default, keeps every one. Past the cap the
+    /// least recently used resources are evicted, together with every cached document that lists them, except
+    /// those something still holds: a `Live` a view or variable keeps, the items and loaded pages of an alive
+    /// collection, the resources of the response being stored, and a locally mutated resource while a GET sent
+    /// before the mutation is still on its way. So the cap is a target: the store holds at most the cap or what is
+    /// in use, whichever is more. Lowering it evicts at once.
+    /// Usage: `Store(baseURL: url, handlers: […], maxCachedResources: 2_000)`
+    @ObservationIgnored public var maxCachedResources: Int? {
+        didSet { evictIfNeeded(keepingUsedAfter: resources.clock) }
+    }
 
     @ObservationIgnored let chain: HandlerChain
     @ObservationIgnored let resources = ResourceCache()
@@ -48,6 +58,9 @@ public final class Store {
     @ObservationIgnored var snapshotTail: Task<Bool, Never>?
     /// Bumped by `clear()`; a snapshot load that started under an older generation discards what it read.
     @ObservationIgnored var snapshotGeneration = 0
+    /// The mutation counter at the start of every `fetch` that has not stored its response yet, as a multiset.
+    /// Eviction keeps an entry mutated after the oldest of them, so that response cannot recreate it unguarded.
+    @ObservationIgnored var pendingFetches: [Int: Int] = [:]
 
     /// - Parameters:
     ///   - baseURL: resolved against relative request paths.
@@ -56,18 +69,21 @@ public final class Store {
     ///   - cachePolicy: default `DefaultCachePolicy()` (soft 1 min, hard 24 h, honoring server headers).
     ///   - snapshotURL: file for `saveSnapshot()` / `loadSnapshot()`; default nil (no persistence). The app picks
     ///     the location and its file protection.
+    ///   - maxCachedResources: least-recently-used eviction past this many resources; default nil (no eviction).
     public init(
         baseURL: URL,
         handlers: [any RequestHandler] = [URLSessionHandler()],
         codec: ResourceCodec = .default,
         cachePolicy: any CachePolicy = DefaultCachePolicy(),
-        snapshotURL: URL? = nil
+        snapshotURL: URL? = nil,
+        maxCachedResources: Int? = nil
     ) {
         self.baseURL = baseURL
         self.chain = HandlerChain(handlers)
         self.codec = codec
         self.cachePolicy = cachePolicy
         self.snapshotURL = snapshotURL
+        self.maxCachedResources = maxCachedResources
     }
 
     // MARK: Cache control
@@ -138,9 +154,11 @@ public final class Store {
     /// Upserts every resource of a document the app obtained itself (a push payload, test seed data)
     /// without a request. Alive collections are not touched.
     public func upsert(_ document: JSONAPIDocument) {
+        let start = resources.clock
         for object in document.allObjects {
             resources.upsert(object, codec: codec, startSequence: mutationCounter)
         }
+        evictIfNeeded(keepingUsedAfter: start)
     }
 
     /// Number of resources in the identity map (tombstones included).
@@ -157,9 +175,11 @@ public final class Store {
             case .expired:
                 break
             case .stale:
+                resources.touch(entry.allKeys)
                 refetchInBackground(request, raw: raw, key: key, as: T.self)
                 return entry
             case .fresh:
+                resources.touch(entry.allKeys)
                 if request.cache.backgroundReload {
                     refetchInBackground(request, raw: raw, key: key, as: T.self)
                 }
@@ -212,6 +232,8 @@ public final class Store {
     /// server produced before the save.
     func fetch<T: Resource>(_ request: Request<JSONAPIDocument>, raw original: RawRequest, key: RequestKey, as type: T.Type) async throws(IonError) -> CachedDocument {
         let startSequence = mutationCounter
+        pendingFetches[startSequence, default: 0] += 1
+        defer { endFetch(startSequence) }
         var raw = original
         if request.method == .get, let etag = requests[key]?.etag, !raw.hasHeader("If-None-Match") {
             raw.headers["If-None-Match"] = etag
@@ -226,6 +248,7 @@ public final class Store {
             if let entry = requests[key] {
                 let refreshed = entry.revalidated(at: fetched.sentAt, response: fetched.response)
                 requests[key] = refreshed
+                resources.touch(refreshed.allKeys)
                 return refreshed
             }
             // Nothing left to revalidate (cleared mid-flight, or a server answering 304 unprompted): fetch outright.
@@ -236,6 +259,14 @@ public final class Store {
         }
         let typed = try await Store.decodePrimaries(of: fetched.document, as: T.self, codec: codec)
         return ingest(fetched, typed: typed, request: request, key: key, startSequence: startSequence)
+    }
+
+    private func endFetch(_ startSequence: Int) {
+        guard let count = pendingFetches[startSequence], count > 1 else {
+            pendingFetches[startSequence] = nil
+            return
+        }
+        pendingFetches[startSequence] = count - 1
     }
 
     /// Sends a GET, or joins the in-flight one for the key when `canJoin` allows it. Only the caller that started
@@ -275,9 +306,12 @@ public final class Store {
     }
 
     /// Writes a response into both caches and tells the alive collection for the key, if any. The request cache
-    /// keeps a newer document over a slower response that was sent earlier.
+    /// keeps a newer document over a slower response that was sent earlier. Evicts last; the response's own
+    /// resources are kept.
     @discardableResult
     func ingest<T: Resource>(_ fetched: Fetched, typed: [ResourceKey: T], request: Request<JSONAPIDocument>, key: RequestKey, startSequence: Int) -> CachedDocument {
+        let start = resources.clock
+        defer { evictIfNeeded(keepingUsedAfter: start) }
         let document = fetched.document
         for object in document.allObjects {
             guard let objectKey = object.key else { continue }

@@ -31,6 +31,7 @@ extension Store {
         for (key, document) in snapshot.documents {
             requests.restore(document, for: RequestKey(key))
         }
+        evictIfNeeded(keepingUsedAfter: resources.clock)
         return true
     }
 

@@ -58,7 +58,8 @@ extension Store {
         }
         var result: [Live<T>] = []
         for key in keys {
-            if returned.contains(key) {
+            // A batch's resources can be evicted by a later response when the store has a small cap; fetch those again.
+            if returned.contains(key), resources.entry(for: key) != nil {
                 let live = try liveResource(for: key, as: T.self)
                 result.append(live)
             } else if !cache.reload, let live = peek(T.self, key: key) {
