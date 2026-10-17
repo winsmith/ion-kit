@@ -8,7 +8,8 @@ with one live-updating instance per resource and an explicit draft/save cycle fo
   response touches the same resource.
 - Edit through a `Draft<T>` copy, save with a PATCH that carries only changed fields, create with POST, delete
   with DELETE; live instances and open collections update from the response.
-- Cache in RAM with stale-while-revalidate defaults that honor the server's `Cache-Control` / `Expires`.
+- Cache in RAM with stale-while-revalidate defaults that honor the server's `Cache-Control` / `Expires`, and
+  optionally save it to a file so the next launch renders the last session's data at once.
 - Swift 6, Foundation only, no third-party dependencies. Compiles on macOS 15, iOS 18 and Linux.
 
 IonKit borrows [WarpDrive](https://warp-drive.io)'s layering (request chain → cache → live resources), not its
@@ -19,7 +20,7 @@ truth for the package.
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.3.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.4.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -133,6 +134,25 @@ serves older ones while refetching in the background, and refetches anything old
 server's `max-age` / `Expires`; a document with an `ETag` is refetched with `If-None-Match`, and a 304 just makes it
 fresh again. Per request: `cache: .reload`, `cache: .backgroundReload`.
 
+### Persisting the cache
+
+Give the store a file and it can save both caches there and read them back on the next launch, so the first
+screen renders from the last session's data before any response arrives and stays readable offline:
+
+```swift
+let store = Store(baseURL: url, handlers: […], snapshotURL: URL.cachesDirectory.appending(path: "ionkit.json"))
+await store.loadSnapshot()                                  // once, before the first request
+…
+.onChange(of: scenePhase) { if $0 == .background { Task { await store.saveSnapshot() } } }
+```
+
+Restored documents are served at once however old they are and refetched in the background on their first load
+(with `If-None-Match` when they had an ETag). Data already in memory wins over the file. A missing or corrupt file,
+or one written by another IonKit format or for another base URL, is ignored and the store starts empty; both
+methods return `false` instead of throwing. `store.clear()` deletes the file. Encoding, decoding and the atomic
+write run off the main actor. IonKit only takes a URL: where the file lives and its file protection are the app's
+choice (on iOS a new file gets the app's default protection class).
+
 ## Editing
 
 ```swift
@@ -219,9 +239,9 @@ docker run --rm -v $PWD:/src -w /src swift:6.1 swift test     # Linux
 ## Status
 
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
-`RetryHandler`, batched `resolve`), v1.2 (fixes) and v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
-as success) are implemented and tested against `MockHandler`. Releases are git tags; depend on
-`from: "1.3.0"`. See the milestone list in
+`RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
+as success) and v1.4 (cache snapshot) are implemented and tested against `MockHandler`. Releases are git tags;
+depend on `from: "1.4.0"`. See the milestone list in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License

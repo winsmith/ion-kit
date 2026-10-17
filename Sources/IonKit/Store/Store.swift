@@ -30,6 +30,8 @@ public final class Store {
     /// any HTTP response. Observable, so an "offline" badge can follow it.
     /// Usage: `if store.lastTransportError != nil { OfflineBadge() }`
     public private(set) var lastTransportError: IonError?
+    /// Where `saveSnapshot()` writes the caches and `loadSnapshot()` reads them; nil keeps the store RAM only.
+    public let snapshotURL: URL?
 
     @ObservationIgnored let chain: HandlerChain
     @ObservationIgnored let resources = ResourceCache()
@@ -43,22 +45,30 @@ public final class Store {
     /// Open `batch` calls; while above zero, `invalidate(type:)` defers collection reloads.
     @ObservationIgnored private var batchDepth = 0
     @ObservationIgnored private var deferredReloadTypes: Set<String> = []
+    /// The last snapshot write or delete; each one waits for the previous, so they reach the disk in call order.
+    @ObservationIgnored var snapshotTail: Task<Bool, Never>?
+    /// Bumped by `clear()`; a snapshot load that started under an older generation discards what it read.
+    @ObservationIgnored var snapshotGeneration = 0
 
     /// - Parameters:
     ///   - baseURL: resolved against relative request paths.
     ///   - handlers: the chain, last one performing the request. Default: `[URLSessionHandler()]`.
     ///   - codec: key casing and date handling for resource structs.
     ///   - cachePolicy: default `DefaultCachePolicy()` (soft 1 min, hard 24 h, honoring server headers).
+    ///   - snapshotURL: file for `saveSnapshot()` / `loadSnapshot()`; default nil (no persistence). The app picks
+    ///     the location and its file protection.
     public init(
         baseURL: URL,
         handlers: [any RequestHandler] = [URLSessionHandler()],
         codec: ResourceCodec = .default,
-        cachePolicy: any CachePolicy = DefaultCachePolicy()
+        cachePolicy: any CachePolicy = DefaultCachePolicy(),
+        snapshotURL: URL? = nil
     ) {
         self.baseURL = baseURL
         self.chain = HandlerChain(handlers)
         self.codec = codec
         self.cachePolicy = cachePolicy
+        self.snapshotURL = snapshotURL
     }
 
     // MARK: Cache control
@@ -110,13 +120,19 @@ public final class Store {
     }
 
     /// Drops every cached resource and document, for logout. Alive collections become empty (`state == .idle`)
-    /// until reloaded; a reload running at that moment is cancelled and cannot bring old data back.
+    /// until reloaded; a reload running at that moment is cancelled and cannot bring old data back. With a
+    /// `snapshotURL` the file is deleted too (after any save already under way), and a `loadSnapshot()` still
+    /// reading discards what it read.
     public func clear() {
         resources.removeAll()
         requests.removeAll()
         deferredReloadTypes = []
         for collection in aliveCollections(ofType: nil) {
             collection.reset()
+        }
+        snapshotGeneration += 1
+        if let snapshotURL {
+            enqueueSnapshotWork { CacheSnapshot.remove(at: snapshotURL); return true }
         }
     }
 
@@ -137,8 +153,8 @@ public final class Store {
     func load<T: Resource>(_ request: Request<JSONAPIDocument>, as type: T.Type) async throws -> CachedDocument {
         let raw = try RawRequest(request, baseURL: baseURL)
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
-        if request.method == .get, !request.cache.reload, let entry = requests[key] {
-            switch cachePolicy.state(of: entry, now: Date()) {
+        if request.method == .get, !request.cache.reload, let entry = usableEntry(for: key, as: T.self) {
+            switch state(of: entry) {
             case .expired:
                 break
             case .stale:
@@ -152,6 +168,30 @@ public final class Store {
             }
         }
         return try await fetch(request, raw: raw, key: key, as: T.self)
+    }
+
+    /// What the cache step makes of a document: a restored one is stale whatever its age and the policy say, unless
+    /// it was invalidated after it was received; everything else is the policy's call.
+    func state(of entry: CachedDocument, now: Date = Date()) -> CacheState {
+        guard entry.isRestored else { return cachePolicy.state(of: entry, now: now) }
+        if let invalidatedAt = entry.invalidatedAt, invalidatedAt > entry.receivedAt { return .expired }
+        return .stale
+    }
+
+    /// The cached document for a key, except a restored one whose primary resources no longer decode as `T` (the
+    /// app's struct changed since the snapshot was written): that one is dropped, ETag included, so the load
+    /// fetches outright instead of failing with `.decoding`.
+    private func usableEntry<T: Resource>(for key: RequestKey, as type: T.Type) -> CachedDocument? {
+        guard let entry = requests[key] else { return nil }
+        guard entry.isRestored, T.self != NoResource.self else { return entry }
+        let decodes = entry.primary.allSatisfy { primary in
+            (try? resources.live(for: primary, as: T.self, codec: codec)) != nil
+        }
+        guard decodes else {
+            requests[key] = nil
+            return nil
+        }
+        return entry
     }
 
     /// `load` without typed primaries.

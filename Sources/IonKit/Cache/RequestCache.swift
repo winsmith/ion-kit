@@ -19,6 +19,9 @@ public struct CachedDocument: Sendable {
     public var serverExpiry: Date?
     /// The response's `ETag`; sent back as `If-None-Match` when the document is refetched.
     public var etag: String?
+    /// True for a document loaded from a `CacheSnapshot` and not yet refetched; the store serves it as stale.
+    /// Not written to the snapshot.
+    var isRestored = false
 
     public init(
         primary: [ResourceKey], included: [ResourceKey] = [], isCollection: Bool, links: Links = Links(),
@@ -48,7 +51,18 @@ public struct CachedDocument: Sendable {
         entry.receivedAt = sentAt
         entry.etag = response.header("ETag") ?? etag
         entry.serverExpiry = CacheHeaders.expiry(of: response, receivedAt: sentAt) ?? lifetime.map { sentAt.addingTimeInterval($0) }
+        entry.isRestored = false
         return entry
+    }
+}
+
+/// Written to and read from a `CacheSnapshot`; `isRestored` is set on load, never stored.
+extension CachedDocument: Codable {
+    enum CodingKeys: String, CodingKey {
+        case primary, included, isCollection, links, meta
+        // swiftlint:disable:next identifier_name - matches the `op` property
+        case op
+        case receivedAt, invalidatedAt, types, serverExpiry, etag
     }
 }
 
@@ -74,6 +88,17 @@ final class RequestCache {
         for (requestKey, entry) in entries where entry.primary.contains(key) {
             entries[requestKey]?.invalidatedAt = now
         }
+    }
+
+    /// Stores a document read from a snapshot, marked restored, unless the key already has an entry (anything in
+    /// RAM is newer). Returns true when the document was stored.
+    @discardableResult
+    func restore(_ document: CachedDocument, for key: RequestKey) -> Bool {
+        guard entries[key] == nil else { return false }
+        var restored = document
+        restored.isRestored = true
+        entries[key] = restored
+        return true
     }
 
     func removeAll() {

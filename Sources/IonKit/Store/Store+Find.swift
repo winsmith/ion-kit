@@ -42,7 +42,7 @@ extension Store {
     func cachedDocument(for request: Request<JSONAPIDocument>) -> CachedDocument? {
         guard let raw = try? RawRequest(request, baseURL: baseURL) else { return nil }
         let key = request.cache.key.map(RequestKey.init) ?? raw.key
-        guard let entry = requests[key], cachePolicy.state(of: entry, now: Date()) != .expired else { return nil }
+        guard let entry = requests[key], state(of: entry) != .expired else { return nil }
         return entry
     }
 
