@@ -490,7 +490,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅<br/>(Village gate open)"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -534,12 +534,12 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] `delete` treats a 404 as success.
 - [x] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate; Village PR 9, 2026-10-17).
 
-**v1.4 — Persistence** (the cache snapshot from v3, [issue #10](https://github.com/winsmith/ion-kit/issues/10)) — package side done 2026-10-17
+**v1.4 — Persistence** (the cache snapshot from v3, [issue #10](https://github.com/winsmith/ion-kit/issues/10)) — done 2026-10-17
 
 - [x] `CacheSnapshot` and `Store(snapshotURL:)`: `saveSnapshot()` writes the resource cache (raw entries, tombstones) and the request cache atomically, off the main actor; `loadSnapshot()` restores both before the first request.
 - [x] Restored documents are served stale whatever their age and revalidate on their first load; one invalidated before the save is expired; RAM wins over the snapshot.
 - [x] A missing, corrupt, other-version or other-base-URL file is discarded silently; `clear()` deletes the file and overtakes a load in progress; a restored entry that no longer decodes is fetched again.
-- [ ] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate; in review as Village PR 19).
+- [x] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate; Village PR 19, 2026-10-17).
 
 **v1.5 — Typed throws** ([issue #1](https://github.com/winsmith/ion-kit/issues/1)) — done 2026-10-17
 
@@ -1094,6 +1094,12 @@ ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the
   two equal addresses can be unequal `URL` values.
 - **Toolchain.** Built and tested locally in the `swift:6.1` and `swift:6.2` containers; SwiftLint and Xcode 16.3
   ran in CI.
+- **Village adopted the snapshot** (Village PR 19, 2026-10-17). The file is `ionkit-cache.json` in Caches, so it is
+  never backed up and the system may purge it. `AccountService.restore()` loads it from `RootView`'s `.task` before
+  the first screen, `saveSnapshot()` runs whenever the scene leaves `.active` (`.inactive` too, since a quit from the
+  foreground on macOS never reaches `.background`), and sign-out or a 401 deletes it through `store.clear()`; a
+  signed-out launch deletes a leftover file. `AccountServiceTests` covers a cold launch rendering before any request,
+  deletion on sign-out and the signed-out launch.
 
 ## Implementation notes (2026-10-17, v1.3)
 
