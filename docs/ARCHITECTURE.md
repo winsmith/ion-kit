@@ -7,8 +7,8 @@
 > [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
 > on 2026-10-16, v1.2 (two fixes found in the vllage app), v1.3 (the request outcome observer, `batch` and
 > DELETE 404 as success), v1.4 (the cache snapshot), v1.5 (typed throws on Swift 6.2), v1.6 (LRU eviction) and v1.7
-> (observable `related`) on 2026-10-17. Consumers of the library start at
-> [Current state of the code](#current-state-of-the-code-v17-2026-10-17). Change the code and this file in the same
+> (observable `related`) on 2026-10-17, and v1.8 (`onOutcome` for every request) on 2026-10-18. Consumers of the
+> library start at [Current state of the code](#current-state-of-the-code-v18-2026-10-18). Change the code and this file in the same
 > pull request.
 
 ## Purpose and goals
@@ -178,8 +178,9 @@ public struct RawResponse: Sendable { public let status: Int; public let headers
 
 - `store.onError: (@MainActor (IonError, RawRequest) -> Void)?` is called once per request that failed in the handler chain, with `.transport` or `.http` errors only, before the error reaches the caller (if there is one). A request counts once however many attempts `RetryHandler` made, and callers that share one in-flight GET count once. `.cancelled` is never reported, a response that did not decode is not reported (it is a client bug, not an outcome to react to), and the statuses the store accepts (a 304 to a GET, a 404 to a DELETE) are not errors. The `RawRequest` lets the app tell requests apart: a sign-in endpoint that answers 401 for a wrong code should not sign anyone out.
 - `store.lastTransportError: IonError?` is observable: the `.transport` error of the most recently *sent* request that has finished, cleared by any later-sent request that got an HTTP response of any status. A slow request sent before a newer one cannot override the newer one's outcome. Show "offline" while it is set; it clears on its own when the next request reaches the server.
+- `store.onOutcome: (@MainActor (RequestOutcome) -> Void)?` (v1.8) is called once per request the store sent, successful or not, under the same counting rules as `onError` and right after it. A `RequestOutcome` carries the `RawRequest`, the HTTP `status` (nil when no answer arrived or the body was not a JSON:API document), the `error` (nil when the store accepted the answer, so an accepted 304 or a DELETE's 404 is a success with its status; otherwise `.transport`, `.http` or `.decoding`, never `.cancelled`), `sentAt` and `finishedAt`. It describes the exchange, not what the app made of the answer: a 2xx whose resources do not decode as the app's structs is a success here and `.decoding` for the caller. A cache hit sends nothing and reports nothing. It is the hook for activity indicators, toasts and request logs.
 
-Typical wiring: `store.onError = { error, request in if error.status == 401, !request.url.path.contains("/auth/") { account.signOut() } }` and `if store.lastTransportError != nil { OfflineBadge() }`. The handler should be idempotent: after a sign-out, other requests that were already in flight may still report their 401.
+Typical wiring: `store.onError = { error, request in if error.status == 401, !request.url.path.contains("/auth/") { account.signOut() } }`, `if store.lastTransportError != nil { OfflineBadge() }` and `store.onOutcome = { toasts.show($0) }`. The handler should be idempotent: after a sign-out, other requests that were already in flight may still report their 401.
 
 **Store builders (v1)**
 
@@ -463,6 +464,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | Field-level validation errors only when `source.pointer` is present | The spec makes `source` optional; forms fall back to `title` / `detail` |
 | No token-refresh hook in v1; a 401 logs the user out | Email-code login issues long-lived tokens; refresh can be a handler later |
 | Outcomes are reported through one optional closure, `store.onError(error, request)`, plus an observable `lastTransportError`; once per request, never `.cancelled`, never for accepted statuses (2026-10-17, v1.3) | A 401 from a background revalidation or a `Fetch` had no caller to sign out from; a closure keeps the store free of a delegate protocol, and the request lets apps exempt auth endpoints. The latest-sent request decides "offline", the same rule the request cache uses |
+| Successes are reported through a second closure, `store.onOutcome(outcome)`, next to `onError`, not by widening `onError` or adding an `AsyncStream` (2026-10-18, v1.8) | `onError` keeps its signature and its meaning, so a sign-out handler never has to filter successes; a closure is called synchronously on the main actor before the caller resumes, which a stream cannot promise, and costs nothing when unset |
 | `batch` defers only the reloads of alive collections, is store-wide (a depth counter on the main actor, not a task-local) and flushes on throw (2026-10-17, v1.3, [#11](https://github.com/winsmith/ion-kit/issues/11)) | Staleness must stay immediate so a query inside the batch never sees pre-save data; a task-local would miss saves made from task-group children |
 | A DELETE answered with 404 counts as deleted (2026-10-17, v1.3) | JSON:API says a server SHOULD answer 404 for a missing resource; the outcome the user wanted holds, and a retried DELETE becomes safe. A routing bug that answers 404 would also "succeed"; accepted |
 | Cache in RAM, no eviction, tombstones instead of removal, no persistence in v1 | Data volume is small; one instance per key must survive a delete; persistence came in v1.4 through the seam reserved for it (`CacheSnapshot`), opt-in eviction in v1.6 |
@@ -482,6 +484,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | `Live` holds its store weakly (2026-10-17, v1.7) | `related` on an instance needs the cache; weak like `LiveCollection.store`, so a view holding an instance never keeps a logged-out store alive |
 | With a cap, a view reading `related` without holding the instances can see one evicted (2026-10-17, v1.7) | A view that shows the instances holds them, and held instances are never evicted; one that only counts them sees the cache as it is and re-renders when it changes |
 | The typed-relationships release is 1.7.0 (2026-10-17) | Additive; no behavior of existing API changes |
+| The outcomes release is 1.8.0 (2026-10-18) | Additive; `onError` and `lastTransportError` behave as before |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors. Default rules stay on, with trailing commas required in multi-line collection literals (the style the code already used); short names such as `op` are suppressed at their declaration with a reason, not turned off repo-wide |
@@ -510,7 +513,7 @@ Three milestones reach a usable v1.0; each one is independently testable without
 
 ```mermaid
 flowchart LR
-    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v17["v1.7 Typed relationships ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
+    v01["v0.1 Wire format ✅"] --> v02["v0.2 Reads ✅"] --> v03["v0.3 = v1.0 Writes ✅"] --> v1x["v1.1 Ergonomics ✅"] --> v13["v1.3 Outcomes and batches ✅"] --> v14["v1.4 Persistence ✅"] --> v15["v1.5 Typed throws ✅"] --> v16["v1.6 Eviction ✅"] --> v17["v1.7 Typed relationships ✅"] --> v18["v1.8 Outcomes for successes ✅"] --> v2["v2 Depth"] --> v3["v3 Offline writes"]
     style v03 stroke-width:3px
 ```
 
@@ -580,6 +583,11 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] Observable through one `TypeRevision` per resource type, bumped when a key is added (response, `upsert`, snapshot restore) or removed (eviction, `clear()`); parent id changes and deletions are observed on the instances.
 - [x] Deleted resources and duplicate ids skipped; never fetches; counts as a use for eviction; `Live` holds its store weakly.
 
+**v1.8 — Outcomes for successes** (what vllage's toasts need, [vllage issue #14](https://github.com/winsmith/vllage/issues/14)) — package side done 2026-10-18
+
+- [x] `RequestOutcome` and `store.onOutcome`, reported once per request from the same place as `onError` (`record`), successes and accepted statuses included, never `.cancelled`.
+- [ ] vllage shows a toast for loads, saves and failures from `onOutcome` (the gate).
+
 **v2 — Depth**: `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
 **v3 — Offline writes**: optional offline write queue built on `Draft` values, persisted next to the cache snapshot (which shipped in v1.4); conflict detection via a `version` attribute.
@@ -631,17 +639,17 @@ IonKit/
 
 **How to use this document when prompting an agent:** give it the section for the milestone, the Conventions block and the Definition of done; ask it to list the public API it will add before writing code, and to stop and ask when a decision in the table above would need to change.
 
-## Current state of the code (v1.7, 2026-10-17)
+## Current state of the code (v1.8, 2026-10-18)
 
 This section is the reference for anyone, human or agent, depending on IonKit right now: what exists, what its
-signatures are, and what to rely on. It describes the package as of the v1.7 pull request on 2026-10-17; update it
+signatures are, and what to rely on. It describes the package as of the v1.8 pull request on 2026-10-18; update it
 in the same pull request as any public API change.
 
 **Status.** v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page reload,
 ETag / 304, `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`,
-DELETE 404 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction) and v1.7
-(observable `related`) are implemented in `Sources/IonKit` (about 3,850 lines) with `Sources/IonKitTesting` (about
-240 lines) and 143 swift-testing tests that pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with
+DELETE 404 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction), v1.7
+(observable `related`) and v1.8 (`onOutcome`) are implemented in `Sources/IonKit` (about 3,900 lines) with
+`Sources/IonKitTesting` (about 240 lines) and 156 swift-testing tests that pass in the `swift:6.2` and `swift:6.4` containers and, through CI, with
 Xcode 26. Of the v2 list eviction and `related` exist; nothing on the v3 list does. There is no sample app and the
 fixtures are synthetic.
 
@@ -649,14 +657,14 @@ fixtures are synthetic.
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.7.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.8.0"),
 …
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
 
 Platforms: macOS 15, iOS 18, Linux. Toolchain: Swift 6.2 or later (Xcode 26). Swift 6 language mode with strict
-concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, `1.7.0`, …) following semantic
+concurrency; Foundation only. Releases are git tags (`1.1`, `1.2`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, `1.7.0`, `1.8.0`, …) following semantic
 versioning; depend on a version range (`from:`) rather than `main`. A release is cut by merging its pull request and tagging the merge commit on `main`.
 
 **Behaviors to rely on.**
@@ -689,6 +697,9 @@ versioning; depend on a version range (`from:`) rather than `main`. A release is
   before the caller does, including background revalidations, collection reloads and `Fetch`; never `.cancelled`,
   a 304 to a GET or a 404 to a DELETE. `store.lastTransportError` is set by the latest-sent request that failed in
   transport and cleared by the next one that reached the server.
+- `store.onOutcome` (v1.8) hears about every request the store sent, success or failure, right after `onError` and
+  under its counting rules; a `RequestOutcome` has the request, the status, the error (nil on success, never
+  `.cancelled`) and the timing. Cache hits send nothing and report nothing.
 - Inside `store.batch { }`, mutations update caches and lists at once but alive collections reload only when the
   outermost batch ends, once per collection, also when the closure throws.
 - `delete` succeeds on 404: the resource is tombstoned and leaves every list as for a 2xx.
@@ -931,6 +942,7 @@ public enum ResolveStrategy: Sendable, Hashable {                  // v1.1
     let baseURL: URL; let codec: ResourceCodec; var cachePolicy: any CachePolicy
     var resolveStrategy: ResolveStrategy                          // v1.1; default .oneByOne
     var onError: (@MainActor (IonError, RawRequest) -> Void)?     // v1.3; once per failed request, never .cancelled
+    var onOutcome: (@MainActor (RequestOutcome) -> Void)?         // v1.8; once per request, success or failure
     private(set) var lastTransportError: IonError?                // v1.3; observable, latest-sent request wins
     let snapshotURL: URL?                                         // v1.4; nil: RAM only
     var maxCachedResources: Int?                                  // v1.6; nil: no eviction; lowering it evicts at once
@@ -1062,6 +1074,22 @@ a batched request format (`batch` coalesces reloads; each save is still its own 
 their own or by size in bytes, an offline write queue, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-10-18, v1.8)
+
+- **Still one place.** `record(_:status:for:sentAt:)` gained the status and calls `onOutcome` last, after
+  `lastTransportError` and `onError`, so every rule `onError` follows (retries once, joined GETs once, never
+  `.cancelled`, background work included) holds for `onOutcome` without a second code path. The three callers pass
+  the response's status on success and `error.status` on failure.
+- **`.decoding` differs between the hooks on purpose.** `onError` has skipped a body that is not a JSON:API document
+  since v1.3 (a client bug, nothing to sign out over); `onOutcome` reports it, because an activity log that drops a
+  request is wrong. Its status is nil: `perform` throws before the response leaves it.
+- **The exchange, not the decode.** A 2xx whose primary resources do not decode as `T`, and a `request<Response>`
+  whose body does not decode as `Response`, are successes in the outcome: the store accepted the answer, and the
+  caller gets `.decoding` as before.
+- **`RequestOutcome` has a public initializer** so apps can build outcomes in their own tests without a store.
+- **Verified.** With the call to `onOutcome` removed, every new test failed except the one asserting that a
+  cancelled request reports nothing; built and tested on macOS with Xcode 27.
 
 ## Implementation notes (2026-10-17, v1.7)
 
