@@ -22,7 +22,7 @@ IonKit needs Swift 6.2 or later (Xcode 26 on Apple platforms) and runs on macOS 
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.7.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.8.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -249,6 +249,16 @@ if store.lastTransportError != nil { Label("Offline", systemImage: "wifi.slash")
 
 Make the handler idempotent: requests already in flight can still report a 401 after the sign-out.
 
+`store.onOutcome` (v1.8) hears about every request, successful or not, under the same rules and right after
+`onError`, which suits activity indicators and toasts. A cache hit sends nothing and reports nothing:
+
+```swift
+store.onOutcome = { outcome in
+    if let error = outcome.error { toasts.show(error.localizedDescription) }
+    else if outcome.request.method == .patch { toasts.show("Saved") }
+}
+```
+
 ## Testing
 
 `IonKitTesting` ships `MockHandler`, which serves queued responses by `"METHOD path?query"` and records every
@@ -275,9 +285,9 @@ docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux, the minim
 
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
 `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
-as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction) and v1.7
-(observable `related`) are implemented and tested against `MockHandler`. Releases are git tags; depend on
-`from: "1.7.0"`. See the milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
+as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction), v1.7
+(observable `related`) and v1.8 (`onOutcome`) are implemented and tested against `MockHandler`. Releases are git
+tags; depend on `from: "1.8.0"`. See the milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
 

@@ -74,9 +74,9 @@ extension Store {
         let response: RawResponse
         do {
             response = try await Store.exchange(raw, chain: chain)
-            record(nil, for: raw, sentAt: sentAt)
+            record(nil, status: response.status, for: raw, sentAt: sentAt)
         } catch {
-            record(error, for: raw, sentAt: sentAt)
+            record(error, status: error.status, for: raw, sentAt: sentAt)
             throw error
         }
         do {

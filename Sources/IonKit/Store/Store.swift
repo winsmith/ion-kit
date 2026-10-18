@@ -25,6 +25,13 @@ public final class Store {
     /// one, and callers sharing an in-flight GET as one. Runs before the error reaches the caller.
     /// Usage: `store.onError = { error, _ in if error.status == 401 { account.signOut() } }`
     @ObservationIgnored public var onError: (@MainActor (IonError, RawRequest) -> Void)?
+    /// Called once per request the store sent, successful or not, with what it came to: the request, the HTTP status
+    /// when there was one, and the error when the store did not accept the response. The same counting rules as
+    /// `onError`: covers background revalidations, collection reloads and `Fetch`; never `.cancelled`; the attempts
+    /// of `RetryHandler` count as one, and callers sharing an in-flight GET as one. Runs after `onError` and before
+    /// the result reaches the caller.
+    /// Usage: `store.onOutcome = { outcome in toasts.show(outcome) }`
+    @ObservationIgnored public var onOutcome: (@MainActor (RequestOutcome) -> Void)?
     /// The transport error of the most recently sent request that finished, or nil once a request sent later got
     /// any HTTP response. Observable, so an "offline" badge can follow it.
     /// Usage: `if store.lastTransportError != nil { OfflineBadge() }`
@@ -289,10 +296,10 @@ public final class Store {
         let fetched: Fetched
         do {
             fetched = try await flight.task.value
-            if owned { record(nil, for: raw, sentAt: flight.startedAt) }
+            if owned { record(nil, status: fetched.response.status, for: raw, sentAt: flight.startedAt) }
         } catch {
             let error = IonError(error)   // `Task` has no typed failure; `perform` only throws `IonError`
-            if owned { record(error, for: raw, sentAt: flight.startedAt) }
+            if owned { record(error, status: error.status, for: raw, sentAt: flight.startedAt) }
             throw error
         }
         if Task.isCancelled { throw .cancelled }
@@ -345,22 +352,24 @@ public final class Store {
 
     // MARK: Outcomes
 
-    /// `perform` with the outcome reported to `onError` and `lastTransportError`; for requests no other caller shares.
+    /// `perform` with the outcome reported to `onError`, `onOutcome` and `lastTransportError`; for requests no other
+    /// caller shares.
     func send(_ raw: RawRequest, accepting: Set<Int> = []) async throws(IonError) -> Fetched {
         let sentAt = Date()
         do {
             let fetched = try await Store.perform(raw, chain: chain, sentAt: sentAt, accepting: accepting)
-            record(nil, for: raw, sentAt: sentAt)
+            record(nil, status: fetched.response.status, for: raw, sentAt: sentAt)
             return fetched
         } catch {
-            record(error, for: raw, sentAt: sentAt)
+            record(error, status: error.status, for: raw, sentAt: sentAt)
             throw error
         }
     }
 
-    /// Updates `lastTransportError` (the latest-sent request wins) and calls `onError` for transport and HTTP
-    /// errors. A cancelled request reports nothing; a response that did not decode still proves the server answered.
-    func record(_ error: IonError?, for raw: RawRequest, sentAt: Date) {
+    /// Updates `lastTransportError` (the latest-sent request wins), calls `onError` for transport and HTTP errors and
+    /// then `onOutcome` for every outcome. A cancelled request reports nothing; a response that did not decode still
+    /// proves the server answered, and reaches `onOutcome` but not `onError`.
+    func record(_ error: IonError?, status: Int?, for raw: RawRequest, sentAt: Date) {
         if case .cancelled? = error { return }
         if sentAt >= lastOutcomeSentAt {
             lastOutcomeSentAt = sentAt
@@ -370,13 +379,15 @@ public final class Store {
                 lastTransportError = nil
             }
         }
-        guard let error else { return }
-        switch error {
-        case .transport, .http:
-            onError?(error, raw)
-        default:
-            break
+        if let error {
+            switch error {
+            case .transport, .http:
+                onError?(error, raw)
+            default:
+                break
+            }
         }
+        onOutcome?(RequestOutcome(request: raw, status: status, error: error, sentAt: sentAt, finishedAt: Date()))
     }
 
     /// Runs the handler chain and maps a status outside 2xx and `accepting` to `IonError.http`. Nonisolated.
@@ -451,6 +462,40 @@ public final class Store {
         let included = cached.included.compactMap { resources.entry(for: $0)?.raw }
         let data: PrimaryData = cached.isCollection ? .many(primary) : .one(primary.first)
         return JSONAPIDocument(data: data, included: included, links: cached.links.isEmpty ? nil : cached.links, meta: cached.meta)
+    }
+}
+
+/// What one request the store sent came to; `Store.onOutcome` receives one per request.
+///
+/// It describes the exchange with the server, not what the app made of the answer: a 2xx whose resources do not
+/// decode as the app's structs is a success here and an `IonError.decoding` for the caller.
+///
+/// Usage: `if let error = outcome.error { log(error) } else if outcome.request.method == .patch { show("Saved") }`
+public struct RequestOutcome: Sendable {
+    /// The request as it entered the handler chain.
+    public let request: RawRequest
+    /// The HTTP status of the answer (an accepted 304 to a GET or 404 to a DELETE included); nil when no answer
+    /// arrived or the body was not a JSON:API document.
+    public let status: Int?
+    /// Nil when the store accepted the answer; otherwise `.transport`, `.http` or `.decoding` (the body was not a
+    /// JSON:API document). Never `.cancelled`.
+    public let error: IonError?
+    /// When the request left the store.
+    public let sentAt: Date
+    /// When the store had the outcome, retries included.
+    public let finishedAt: Date
+
+    /// True when the store accepted the answer.
+    public var isSuccess: Bool { error == nil }
+    /// How long the request took, retries included.
+    public var duration: TimeInterval { finishedAt.timeIntervalSince(sentAt) }
+
+    public init(request: RawRequest, status: Int?, error: IonError?, sentAt: Date, finishedAt: Date) {
+        self.request = request
+        self.status = status
+        self.error = error
+        self.sentAt = sentAt
+        self.finishedAt = finishedAt
     }
 }
 
