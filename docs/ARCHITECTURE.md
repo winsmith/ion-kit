@@ -5,7 +5,7 @@
 > This file is the canonical source of truth for IonKit's design. It started as a Claude Docs document on
 > 2026-10-15 and was moved into the repository, with the revisions listed under
 > [Implementation notes](#implementation-notes-2026-10-15), after v0.1–v0.3 landed; v1.1 (the v1.x ergonomics) followed
-> on 2026-10-16, v1.2 (two fixes found in the Village app), v1.3 (the request outcome observer, `batch` and
+> on 2026-10-16, v1.2 (two fixes found in the vllage app), v1.3 (the request outcome observer, `batch` and
 > DELETE 404 as success), v1.4 (the cache snapshot), v1.5 (typed throws on Swift 6.2), v1.6 (LRU eviction) and v1.7
 > (observable `related`) on 2026-10-17. Consumers of the library start at
 > [Current state of the code](#current-state-of-the-code-v17-2026-10-17). Change the code and this file in the same
@@ -13,7 +13,7 @@
 
 ## Purpose and goals
 
-IonKit is a Swift package that lets a SwiftUI app display and edit structs that live behind any JSON:API server, with one live-updating instance per resource and an explicit draft/save cycle for edits. The Village app (a Vapor 5 JSON:API server, one user per graph, online-only writes) is its first consumer and the source of its fixtures, but nothing in the package is Village-specific: the target is JSON:API 1.1 as a client, with the spec's optional members optional in IonKit too.
+IonKit is a Swift package that lets a SwiftUI app display and edit structs that live behind any JSON:API server, with one live-updating instance per resource and an explicit draft/save cycle for edits. The vllage app (a Vapor 5 JSON:API server, one user per graph, online-only writes) is its first consumer and the source of its fixtures, but nothing in the package is vllage-specific: the target is JSON:API 1.1 as a client, with the spec's optional members optional in IonKit too.
 
 **Goals for v1**
 
@@ -145,7 +145,7 @@ struct Person: Resource {
 
 The merge-then-decode approach costs one dictionary rebuild per resource and keeps `Codable` synthesis, custom `CodingKeys`, defaults and optionals all working. It is the single most important simplification in IonKit: no property wrappers for attributes, no macros, no reflection, no registry of types.
 
-**Identity.** `ResourceKey(type: "person", id: "42")` identifies a resource in the cache. The Village server assigns ids, so a new resource has none until the server answers: `Draft(new:)` fills `id` with a client-local placeholder (`local:` + UUID) that the codec never sends, and the `Live<T>` for a new resource is created from the response, with the server's id. Nothing is ever rekeyed. A draft whose relationships reference a `local:` id cannot be saved (`IonError.invalidDraft`); save the related resource first.
+**Identity.** `ResourceKey(type: "person", id: "42")` identifies a resource in the cache. The vllage server assigns ids, so a new resource has none until the server answers: `Draft(new:)` fills `id` with a client-local placeholder (`local:` + UUID) that the codec never sends, and the `Live<T>` for a new resource is created from the response, with the server's id. Nothing is ever rekeyed. A draft whose relationships reference a `local:` id cannot be saved (`IonError.invalidDraft`); save the related resource first.
 
 **Dates.** `Date` attributes are encoded as ISO 8601 UTC with fractional seconds and decoded with a custom strategy that accepts both forms (`Date.ISO8601FormatStyle(includingFractionalSeconds:)`, available in swift-foundation on Linux). `JSONDecoder`'s plain `.iso8601` rejects `2026-10-15T10:00:00.123Z`, which a `timestamptz` round-trip can produce.
 
@@ -221,7 +221,7 @@ Query parameters are sorted before the `RequestKey` is derived so that `filter[a
 
 ## Cache
 
-The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted by default; a Village graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below); since v1.6 a store can cap the resource cache and evict the least recently used resources (see Eviction below).
+The cache is two dictionaries owned by the store, both main-actor only, both in RAM: a resource cache (identity map) and a request cache. Nothing is evicted by default; a vllage graph of a few thousand people and notes fits comfortably in memory. Since v1.4 both can be written to a snapshot file and read back on the next launch (see Persistence below); since v1.6 a store can cap the resource cache and evict the least recently used resources (see Eviction below).
 
 **Resource cache** — `[ResourceKey: Entry]`, where `Entry` holds the latest raw `ResourceObject`, an optional typed `Live<T>` (stored as `AnyObject` and read as `any AnyLiveResource`, so eviction can check whether anything else holds it), `isDeleted`, a `mutationSequence` and, since v1.6, a `lastUsed` stamp. Every response passes through `upsert(document:)`, including responses to POST, PATCH, DELETE and custom requests, so a resource seen anywhere is current everywhere. Upsert replaces the raw object; if a `Live<T>` exists it is re-decoded and `live.value` is assigned only when `Equatable` says it changed (`updatedAt` and `raw` are written in the same branch, so an unchanged resource fires no Observation). A raw entry is decoded on its first typed access and the `Live<T>` is kept in the entry, which guarantees one instance per key because the entry outlives every view. A DELETE keeps the entry as a tombstone with `isDeleted = true`: a later response that still lists the key revives the same instance instead of creating a second one, and collections skip tombstones when they materialize. `store.clear()` drops every entry; eviction (v1.6, opt-in) drops the least recently used ones that nothing holds. Since v1.7 the cache holds its store weakly and hands it to every `Live` it creates, and keeps one observable counter per resource type (`TypeRevision`) that `related` reads; the cache bumps it when a key of that type is added or removed (a new entry, eviction, `clear()`, a snapshot restore), never when an existing entry changes.
 
@@ -392,7 +392,7 @@ The diff is computed by encoding `value` and `original` with the codec to `JSONV
 
 **On failure** nothing in the cache changes. `IonError.http(status: 422, errors:)` carries field-level messages via `errors(forAttribute:)`; `IonError.http(status: 409, ...)` or `412` is how a server signals a stale edit, and the app decides whether to reload the draft from the live value. IonKit does not send `If-Match` or compare versions in v1.
 
-**Concurrent edits.** Two drafts of the same resource can exist in one app, or another device may save first; the last `save` wins and the live instance always shows the last server response. A form can call `draft.isStale(against: live)` before saving to warn the user. v2 can add an optional `version` attribute check if Village needs it.
+**Concurrent edits.** Two drafts of the same resource can exist in one app, or another device may save first; the last `save` wins and the live instance always shows the last server response. A form can call `draft.isStale(against: live)` before saving to warn the user. v2 can add an optional `version` attribute check if vllage needs it.
 
 **Delete.** `store.delete(live)` sends `DELETE`, then tombstones the entry, flags `live.isDeleted`, removes the item from every alive collection of that type and invalidates their cache entries. Views holding the instance should dismiss on `isDeleted`. A 404 means the resource is already gone, deleted on another device or by an earlier attempt of the same DELETE, and is handled exactly like a 2xx (v1.3); every other failure throws and changes nothing. That makes a DELETE safe to retry: `RetryHandler(methods: [.get, .delete])`.
 
@@ -414,7 +414,7 @@ let picked = store.related(draft.value.tags)                 // the same for any
 `
 
 - `peek(_:)` is synchronous and never hits the network; it returns only the instances present in the cache, decoding a raw included entry on first access.
-- `resolve(_:)` fills gaps with one `find` per missing id by default. With `store.resolveStrategy = .batched()` (or `strategy:` per call; v1.1) the missing ids go out as one `GET tags?filter[id]=7,9` per batch of 50, sorted so the request key is stable, and any id the query did not return is still fetched one by one; a server that ignores the filter (it answers with resources that were not asked for) makes the call fall back to one by one. The Village server has no filters yet, so the default stays one by one.
+- `resolve(_:)` fills gaps with one `find` per missing id by default. With `store.resolveStrategy = .batched()` (or `strategy:` per call; v1.1) the missing ids go out as one `GET tags?filter[id]=7,9` per batch of 50, sorted so the request key is stable, and any id the query did not return is still fetched one by one; a server that ignores the filter (it answers with resources that were not asked for) makes the call fall back to one by one. The vllage server has no filters yet, so the default stays one by one.
 - Setting a relationship on a draft is assignment: `draft.value.tags.ids = ["7", "9"]`; `save` sends it as `relationships.tags.data`. Relationship `links` and the separate relationship endpoints are not used.
 - There is no inverse maintenance: adding a tag to a person does not update the tag's `people` relationship locally; the next response that includes the tag does.
 
@@ -450,16 +450,16 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 
 | Decision | Why |
 | --- | --- |
-| Any JSON:API 1.1 server is the target; Village is the first consumer and fixture source | Nothing app-specific in the package; spec-optional members stay optional in IonKit |
+| Any JSON:API 1.1 server is the target; vllage is the first consumer and fixture source | Nothing app-specific in the package; spec-optional members stay optional in IonKit |
 | Read through immutable `Live<T>`, edit through `Draft<T>` | Mirrors WarpDrive checkout; keeps local state out of the cache; structs stay plain |
 | Minimum macOS 15 / iOS 18, Swift 6 strict concurrency | Observation, typed throws and modern concurrency without compatibility shims |
 | Relationships are ids + `peek`/`resolve` in v1 | Typed resolution is additive later (it came in v1.7 as `related`); avoids a relationship graph in v1 |
 | Store and caches are `@MainActor`, not an actor | Observation and SwiftUI read synchronously; network and decoding stay off-main anyway |
 | Flat structs decoded via merge-then-`JSONDecoder`; relationship keys captured during encoding | Keeps `Codable` synthesis; no macros, property wrappers, reflection or type registry |
 | Included resources stay raw until first typed access | The store cannot map a wire type string to a Swift type without a registry; lazy decoding needs none |
-| Server-assigned ids; drafts carry a never-sent local placeholder | The Village server does not accept client ids; `Live<T>` is only ever created from a server response, so nothing is rekeyed |
-| Wire keys are camelCase by default; `keyDecodingStrategy` / `keyEncodingStrategy` on the store | Village sends camelCase; other servers dasherize or snake_case |
-| Default cache policy soft 1 min / hard 24 h, honoring `Cache-Control` / `Expires`, configurable per store and request | Village sets `Cache-Control`; a single-user app can keep data for a day and revalidate in the background |
+| Server-assigned ids; drafts carry a never-sent local placeholder | The vllage server does not accept client ids; `Live<T>` is only ever created from a server response, so nothing is rekeyed |
+| Wire keys are camelCase by default; `keyDecodingStrategy` / `keyEncodingStrategy` on the store | vllage sends camelCase; other servers dasherize or snake_case |
+| Default cache policy soft 1 min / hard 24 h, honoring `Cache-Control` / `Expires`, configurable per store and request | vllage sets `Cache-Control`; a single-user app can keep data for a day and revalidate in the background |
 | Field-level validation errors only when `source.pointer` is present | The spec makes `source` optional; forms fall back to `title` / `detail` |
 | No token-refresh hook in v1; a 401 logs the user out | Email-code login issues long-lived tokens; refresh can be a handler later |
 | Outcomes are reported through one optional closure, `store.onError(error, request)`, plus an observable `lastTransportError`; once per request, never `.cancelled`, never for accepted statuses (2026-10-17, v1.3) | A 401 from a background revalidation or a `Fetch` had no caller to sign out from; a closure keeps the store free of a delegate protocol, and the request lets apps exempt auth endpoints. The latest-sent request decides "offline", the same rule the request cache uses |
@@ -489,24 +489,24 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | ~~Minimum Linux toolchain is Swift 6.1; CI runs `swift:6.1` and `swift:6.2` (added 2026-10-15)~~ Superseded by the next row (2026-10-17) | 6.1 is what the implementation was verified on; 6.0 was never run |
 | Minimum toolchain is Swift 6.2 / Xcode 26 (`swift-tools-version: 6.2`); Swift 6.1 is dropped; CI runs `swift:6.2`, `swift:6.4` and Xcode 26 (2026-10-17, v1.5, [#1](https://github.com/winsmith/ion-kit/issues/1)) | Swift 6.1 crashes in IRGen at `-Onone` on the typed-throws store API; 6.2 compiles it. Xcode 26 has shipped for a year and is the runners' default, so consumers lose nothing they still use; a tools-version of 6.2 makes an older toolchain refuse the package with a clear message instead of crashing in a debug build. Deployment targets stay macOS 15 / iOS 18 |
 | Async store and collection methods are `async throws(IonError)` (2026-10-17, v1.5) | The design called for it from the start: `catch .cancelled` and `catch .http(let status, _)` without casts. `RequestHandler` stays `throws` (any error), since a handler may wrap any library; the store converts at that boundary |
-| ETags live on documents, not resources: `If-None-Match` on GETs, no `If-Match` on writes (2026-10-16) | The request cache is where revalidation pays off; Village sends no ETag at all and decided against version checks |
+| ETags live on documents, not resources: `If-None-Match` on GETs, no `If-Match` on writes (2026-10-16) | The request cache is where revalidation pays off; vllage sends no ETag at all and decided against version checks |
 | A 304 validates a document as of the moment the request was sent, and no caller joins an in-flight GET from before the last invalidation or mutation (2026-10-16) | Otherwise a reload after a save could mark pre-save data fresh |
 | `reload()` refetches every loaded page and swaps the result in once; mutation-driven background reloads refetch page 1 only; concurrent reloads coalesce (2026-10-16) | No reshuffling list under a refresh spinner, and a save does not cost one request per loaded page per alive list |
 | `RetryHandler` retries GET only by default, transient transport errors only, never past `Retry-After > maxDelay` (2026-10-16) | Writes are not idempotent (DELETE is since v1.3, which treats a 404 as success; opt in with `methods: [.get, .delete]`); "offline" should fail at once; a long `Retry-After` under a spinner is worse than the error |
 | `Fetch` is one view for resources and collections, takes the store from the environment or `store:`, passes `retry` to the failure closure, no phase-closure variant (2026-10-16) | A phase closure would be ambiguous with the content-only form under trailing-closure syntax; a failure view without retry is useless in practice |
 | `Fetch` ships inside the `IonKit` target behind `#if canImport(SwiftUI)` rather than as a separate product (2026-10-16) | One import for apps; the cost is SwiftUI linked into macOS command-line consumers, accepted |
-| `resolve` batching is opt-in (`ResolveStrategy.oneByOne` default) and falls back when the server ignores the filter (2026-10-16) | `filter[id]` is a JSON:API recommendation, not a requirement; Village has no filters before its M10 |
-| POST queries with explicit cache keys and a token-refresh handler are not built (2026-10-16) | Village searches with `filter[search]` on GET and signs out on 401; the open questions are answered "no" |
+| `resolve` batching is opt-in (`ResolveStrategy.oneByOne` default) and falls back when the server ignores the filter (2026-10-16) | `filter[id]` is a JSON:API recommendation, not a requirement; vllage has no filters before its M10 |
+| POST queries with explicit cache keys and a token-refresh handler are not built (2026-10-16) | vllage searches with `filter[search]` on GET and signs out on 401; the open questions are answered "no" |
 
 **Open questions** — each needs an answer before the milestone named
 
 - When can the async store API go back to `async throws(IonError)`? Answered 2026-10-17: require Swift 6.2 / Xcode 26 and drop 6.1, done in v1.5 ([issue #1](https://github.com/winsmith/ion-kit/issues/1)); folded into the table above.
 - Client-generated ids (no), key casing (camelCase), `links.next` (yes), expiry defaults (1 min / 24 h, configurable), `source.pointer` (optional, as in the spec), token refresh (none, log out), `Cache-Control` (yes) — all answered on 2026-10-15 and folded into the table above.
-- POST query endpoint (no: Village's search is `filter[search]` on GET, arriving with its browser client; a POST query still caches under `cache.key` but is never *served* from the cache, which is enough until someone needs it) and a token-refresh handler (no: Village signs out on 401) — answered 2026-10-16.
+- POST query endpoint (no: vllage's search is `filter[search]` on GET, arriving with its browser client; a POST query still caches under `cache.key` but is never *served* from the cache, which is enough until someone needs it) and a token-refresh handler (no: vllage signs out on 401) — answered 2026-10-16.
 
 ## Development milestones
 
-Three milestones reach a usable v1.0; each one is independently testable without a network and ends with a gate Village can verify. Nothing after v1.0 is scheduled until Village ships on it.
+Three milestones reach a usable v1.0; each one is independently testable without a network and ends with a gate vllage can verify. Nothing after v1.0 is scheduled until vllage ships on it.
 
 ```mermaid
 flowchart LR
@@ -527,13 +527,13 @@ Each band is a milestone in order; the gate on the right is what must be true be
 
 - [x] `Store` with `find`, `query`, `request`, `peek`, `resolve`; `Live<T>`, `LiveCollection<T>` with `LoadState`, `reload`, `loadMore`; the weak collection registry; key-casing strategies.
 - [x] Resource cache with raw entries, lazy typed decode, upsert of primary + included, tombstones; request cache; `DefaultCachePolicy` with `Cache-Control` / `Expires` support; in-flight dedupe and `mutationSequence`; `invalidate(type:)`, `clear()`.
-- [x] Gate: an integration test in `IonKitTests/StoreTests` reads a list and a detail through `MockHandler`; the Village read-only screens are the demo, not the gate.
+- [x] Gate: an integration test in `IonKitTests/StoreTests` reads a list and a detail through `MockHandler`; the vllage read-only screens are the demo, not the gate.
 
-**v0.3 = v1.0 — Writes** — package side done 2026-10-15; Village gate done 2026-10-17 ([issue #5](https://github.com/winsmith/ion-kit/issues/5))
+**v0.3 = v1.0 — Writes** — package side done 2026-10-15; vllage gate done 2026-10-17 ([issue #5](https://github.com/winsmith/ion-kit/issues/5))
 
 - [x] `Draft<T>`, `store.save(&draft)` (POST / PATCH with diff), `store.delete`; server-assigned ids with local placeholders; `IonError.invalidDraft`.
 - [x] The invalidation rules table, `LiveCollection.autoRefresh`, immediate local removal on delete; `IonError.http.errors(forAttribute:)`.
-- [x] Village creates, edits and deletes people, their notes and their relationships through IonKit (`Draft` + `store.save` / `store.delete` in its list, person and relationship screens; notes are a markdown attribute of a person); README with the examples from this document (the gate; Village PRs 2 and 10, the markdown notes editor in 10, 2026-10-17). Tags are not part of the gate: Village decodes `tags` but has no screen that writes them yet.
+- [x] vllage creates, edits and deletes people, their notes and their relationships through IonKit (`Draft` + `store.save` / `store.delete` in its list, person and relationship screens; notes are a markdown attribute of a person); README with the examples from this document (the gate; vllage PRs 2 and 10, the markdown notes editor in 10, 2026-10-17). Tags are not part of the gate: vllage decodes `tags` but has no screen that writes them yet.
 
 **v1.1 — Ergonomics** (the v1.x list, [issue #6](https://github.com/winsmith/ion-kit/issues/6)) — package side done 2026-10-16
 
@@ -543,23 +543,23 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] `RetryHandler` with backoff, jitter and `Retry-After`, GET only by default; `MockHandler.respond(to:throwing:)`.
 - [x] `resolve` via one `filter[id]` query per batch (`ResolveStrategy.batched`, opt-in).
 - [x] POST queries with explicit keys and a token-refresh handler: not needed (open questions answered "no").
-- [x] Village adopts `Fetch` on its person and list screens and `RetryHandler` in its chain (the gate for calling v1.1 done; Village PR 3, 2026-10-16).
+- [x] vllage adopts `Fetch` on its person and list screens and `RetryHandler` in its chain (the gate for calling v1.1 done; vllage PR 3, 2026-10-16).
 
-**v1.2 — Fixes from the Village app** — done 2026-10-17: `URLSessionHandler` bypasses `URLCache`; `Fetch` keeps its load alive across a spurious `onDisappear` (see the v1.1 implementation notes).
+**v1.2 — Fixes from the vllage app** — done 2026-10-17: `URLSessionHandler` bypasses `URLCache`; `Fetch` keeps its load alive across a spurious `onDisappear` (see the v1.1 implementation notes).
 
-**v1.3 — Outcomes and batches** (what Village's MVP needed next) — done 2026-10-17
+**v1.3 — Outcomes and batches** (what vllage's MVP needed next) — done 2026-10-17
 
 - [x] `store.onError(error, request)` and the observable `store.lastTransportError`, reported once per request from every path (foreground, background revalidation, collection reloads, `Fetch`, non-document requests).
 - [x] `store.batch { }`: alive collections reload once per batch instead of once per save ([issue #11](https://github.com/winsmith/ion-kit/issues/11)).
 - [x] `delete` treats a 404 as success.
-- [x] Village signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate; Village PR 9, 2026-10-17).
+- [x] vllage signs out from `onError`, shows offline from `lastTransportError` and imports inside `batch` (the gate; vllage PR 9, 2026-10-17).
 
 **v1.4 — Persistence** (the cache snapshot from v3, [issue #10](https://github.com/winsmith/ion-kit/issues/10)) — done 2026-10-17
 
 - [x] `CacheSnapshot` and `Store(snapshotURL:)`: `saveSnapshot()` writes the resource cache (raw entries, tombstones) and the request cache atomically, off the main actor; `loadSnapshot()` restores both before the first request.
 - [x] Restored documents are served stale whatever their age and revalidate on their first load; one invalidated before the save is expired; RAM wins over the snapshot.
 - [x] A missing, corrupt, other-version or other-base-URL file is discarded silently; `clear()` deletes the file and overtakes a load in progress; a restored entry that no longer decodes is fetched again.
-- [x] Village renders its lists from the snapshot on a cold launch and stays readable offline (the gate; Village PR 19, 2026-10-17).
+- [x] vllage renders its lists from the snapshot on a cold launch and stays readable offline (the gate; vllage PR 19, 2026-10-17).
 
 **v1.5 — Typed throws** ([issue #1](https://github.com/winsmith/ion-kit/issues/1)) — done 2026-10-17
 
@@ -604,7 +604,7 @@ IonKit/
     IonError.swift
   Sources/IonKitTesting/        MockHandler.swift, Fixtures.swift
   Tests/IonKitTests/            one file per source folder, fixtures under Resources/
-  Examples/VillageSample/       the sample app, not part of the package build on Linux (not yet created)
+  Examples/VllageSample/       the sample app, not part of the package build on Linux (not yet created)
   docs/ARCHITECTURE.md          this document
   AGENTS.md                     the agent guide: commands, conventions, definition of done; CLAUDE.md points to it
   .swiftlint.yml                SwiftLint rules; run `swiftlint` before pushing, CI runs it on every push
@@ -617,7 +617,7 @@ IonKit/
 - Names follow this document: `Store`, `Live`, `LiveCollection`, `Draft`, `Request`, `RequestHandler`, `ResourceKey`, `RequestKey`, `IonError`. Do not introduce `Model`, `Record`, `Entity`, `Manager`.
 - No new dependencies without a line in Decisions and open questions.
 - Prefer deleting over abstracting: a feature not listed under the current milestone is a separate PR with a note in the milestone list, not a hook "for later".
-- Keep the wire format honest: fixtures in `Tests/.../Resources` are real responses captured from the Village server, re-captured when the server changes. Until captured ones exist, hand-written fixtures are allowed if the file name ends in `.synthetic.json`; v0.1 needs at least `person-single.json` (with `included` tags, a `Date` attribute, a `null` to-one and an empty to-many), `people-collection.json` (with `links.next`), `error-422.json` and an empty 204 response.
+- Keep the wire format honest: fixtures in `Tests/.../Resources` are real responses captured from the vllage server, re-captured when the server changes. Until captured ones exist, hand-written fixtures are allowed if the file name ends in `.synthetic.json`; v0.1 needs at least `person-single.json` (with `included` tags, a `Date` attribute, a `null` to-one and an empty to-many), `people-collection.json` (with `links.next`), `error-422.json` and an empty 204 response.
 
 **Definition of done for a task**
 
@@ -1150,7 +1150,7 @@ ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the
   two equal addresses can be unequal `URL` values.
 - **Toolchain.** Built and tested locally in the `swift:6.1` and `swift:6.2` containers; SwiftLint and Xcode 16.3
   ran in CI.
-- **Village adopted the snapshot** (Village PR 19, 2026-10-17). The file is `ionkit-cache.json` in Caches, so it is
+- **vllage adopted the snapshot** (vllage PR 19, 2026-10-17). The file is `ionkit-cache.json` in Caches, so it is
   never backed up and the system may purge it. `AccountService.restore()` loads it from `RootView`'s `.task` before
   the first screen, `saveSnapshot()` runs whenever the scene leaves `.active` (`.inactive` too, since a quit from the
   foreground on macOS never reaches `.background`), and sign-out or a 401 deletes it through `store.clear()`; a
@@ -1170,7 +1170,7 @@ ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the
   on Swift 6.0/6.1; on the main actor the result passes through as is.
 - **Compiler note.** A test that creates drafts inside `group.addTask { @MainActor in … }` within a
   `@MainActor` test crashes Swift's region-based isolation checker ("pattern that the region-based isolation
-  checker does not understand"); calling a `static` helper that owns the `var draft` compiles. Village's importer
+  checker does not understand"); calling a `static` helper that owns the `var draft` compiles. vllage's importer
   uses the same shape.
 
 ## Implementation notes (2026-10-16, v1.1)
@@ -1195,12 +1195,12 @@ What landed with the v1.x ergonomics pull request beyond the sections above, whi
 - **Not built, on purpose:** POST queries served from the cache and a token-refresh handler (both open questions
   answered "no"); batch mutations and persistence stay separate PRs. Typed throws still wait for the Swift 6.2
   decision ([#1](https://github.com/winsmith/ion-kit/issues/1)).
-- **`Fetch` no longer loads in `.task(id:)`** (found in the Village app, 2026-10-16). On iPhone a collapsed
+- **`Fetch` no longer loads in `.task(id:)`** (found in the vllage app, 2026-10-16). On iPhone a collapsed
   `NavigationSplitView` pushing its detail column sent the detail view `onDisappear` right after `onAppear` and
   kept it on screen; that cancelled the `.task`, nothing started it again, and the person screen stayed on its
   progress view. `Fetch` now starts the load in a task it owns, cancels it only when the request, store or retry
   attempt changes, and drops a result for a run that is no longer current.
-- **`URLSessionHandler` bypasses `URLCache`** (found in the Village app, 2026-10-16). Village sends
+- **`URLSessionHandler` bypasses `URLCache`** (found in the vllage app, 2026-10-16). vllage sends
   `Cache-Control: private, max-age=60`, which `URLSession.shared` also honoured: after a save the store invalidated
   and reloaded the list, the reload was answered from `URLCache` with the pre-save document, and that overwrote the
   saved value in the live instance. Requests now use `.reloadIgnoringLocalCacheData`.
@@ -1236,6 +1236,6 @@ section; this list is the changelog for the document.
   does not use defaults for missing keys.
 - **Toolchain.** Verified on Swift 6.1.3 (Linux container), Swift 6.2 (Linux container) and Xcode 16.3 on
   macOS 15 through CI. Swift 6.0 was never run.
-- **Fixtures** are hand-written (`*.synthetic.json`) until captured from Village
-  ([issue #3](https://github.com/winsmith/ion-kit/issues/3)). The Village sample app does not exist yet
+- **Fixtures** are hand-written (`*.synthetic.json`) until captured from vllage
+  ([issue #3](https://github.com/winsmith/ion-kit/issues/3)). The vllage sample app does not exist yet
   ([issue #5](https://github.com/winsmith/ion-kit/issues/5)).
