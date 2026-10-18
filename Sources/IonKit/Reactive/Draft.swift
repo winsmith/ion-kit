@@ -46,10 +46,62 @@ public struct Draft<T: Resource>: Sendable {
         if let original { value = original }
     }
 
-    /// True when the live instance changed since the draft was made (another save or a refetch landed).
+    /// True when the live instance changed since the draft was made (another save or a refetch landed), in any
+    /// field, including ones the draft did not touch. `conflicts(against:)` asks only about the edited fields.
     @MainActor
     public func isStale(against live: Live<T>) -> Bool {
         live.value != original
+    }
+
+    /// The attributes and relationships this draft changed that the live instance has also changed since the draft
+    /// was made, to a different value: the edits a save would overwrite. Fields the draft did not touch never
+    /// conflict, nor does a relationship the live value no longer carries (`.unloaded`). Empty for a new resource, and
+    /// when a value does not encode (which the codec's own types never do; `isStale` still answers then).
+    ///
+    /// Usage: `if !draft.conflicts(against: live).isEmpty { askBeforeOverwriting() }`
+    @MainActor
+    public func conflicts(against live: Live<T>) -> Set<String> {
+        guard let original else { return [] }
+        let codec = ResourceCodec.default
+        guard let changes = try? codec.diff(from: original, to: value), let before = try? codec.encode(original),
+              let remote = try? codec.encode(live.value)
+        else { return [] }
+        var conflicts: Set<String> = []
+        for (key, mine) in changes.attributes {
+            let theirs = remote.attributes[key] ?? .null
+            if theirs != (before.attributes[key] ?? .null), theirs != mine { conflicts.insert(key) }
+        }
+        for (key, mine) in changes.relationships {
+            guard let theirs = remote.relationships[key] else { continue }
+            if theirs != before.relationships[key], theirs != mine { conflicts.insert(key) }
+        }
+        return conflicts
+    }
+
+    /// Moves the draft onto the live instance's current value and keeps its edits: `original` becomes `live.value`,
+    /// and `value` is that value with every attribute and relationship the draft changed set as the draft had it.
+    /// Where the live value changed an edited field too, the draft's edit wins; check `conflicts(against:)` first to
+    /// ask. Does nothing for a new resource, or when a value does not encode.
+    ///
+    /// Usage: `_ = try await store.find(Person.self, id: id, cache: .reload); draft.rebase(onto: live)`
+    @MainActor
+    public mutating func rebase(onto live: Live<T>) {
+        guard let original else { return }
+        let codec = ResourceCodec.default
+        do throws(IonError) {
+            let changes = try codec.diff(from: original, to: value)
+            var rebased = try codec.encode(live.value)
+            for (key, attribute) in changes.attributes {
+                if attribute == .null { rebased.attributes.removeValue(forKey: key) } else { rebased.attributes[key] = attribute }
+            }
+            for (key, relationship) in changes.relationships {
+                rebased.relationships[key] = relationship
+            }
+            value = try codec.decode(rebased, as: T.self)
+            self.original = live.value
+        } catch {
+            return
+        }
     }
 
     /// Records a successful save: `original = value`, with the server-assigned id for a new resource.
