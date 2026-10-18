@@ -40,7 +40,7 @@ Sources/IonKit/
   IonError.swift
 Sources/IonKitTesting/   MockHandler, Fixtures, Store.seed
 Tests/IonKitTests/       one file per source folder; fixtures under Resources/ (*.synthetic.json until real
-                         captures from the Village server replace them)
+                         captures from the vllage server replace them)
 ```
 
 ## Conventions
@@ -69,7 +69,7 @@ Releases are git tags on `main` that follow semantic versioning (`1.3.0`; the fi
 `1.2`). A release pull request moves the "Current state of the code" heading and status in
 `docs/ARCHITECTURE.md` to the new version, ticks its milestone and adds an "Implementation notes" section. Once it
 is merged, the maintainer tags the merge commit (`git tag 1.3.0 <sha> && git push origin 1.3.0`). Consumers then
-raise their `from:` requirement and re-resolve; Village does that in its own pull request.
+raise their `from:` requirement and re-resolve; vllage does that in its own pull request.
 
 ## Definition of done
 
