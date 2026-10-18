@@ -22,7 +22,7 @@ IonKit needs Swift 6.2 or later (Xcode 26 on Apple platforms) and runs on macOS 
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.8.0"),
+.package(url: "https://github.com/winsmith/ion-kit.git", from: "1.9.0"),
 .target(name: "App", dependencies: [.product(name: "IonKit", package: "ion-kit")]),
 .testTarget(name: "AppTests", dependencies: [.product(name: "IonKitTesting", package: "ion-kit")]),
 ```
@@ -204,6 +204,21 @@ alive collections reload. On failure nothing in the cache changes; `IonError.htt
 field-level messages via `errors(forAttribute: "name")` when the server sends `source.pointer`. A DELETE answered
 with 404 counts as deleted (someone else deleted it first), so `RetryHandler(methods: [.get, .delete])` is safe.
 
+### Reloads under unsaved edits
+
+When the resource is reloaded while a form holds unsaved edits (another device saved, or the server derived a new
+relationship), move the draft onto the new value instead of throwing the edits away, and warn only when a field
+the user edited changed too (v1.9):
+
+```swift
+_ = try await store.find(Person.self, id: person.id, cache: .reload)
+if draft.conflicts(against: person).isEmpty {
+    draft.rebase(onto: person)               // edits kept, everything else as the server has it
+}
+```
+
+`draft.isStale(against: person)` still reports any change, edited field or not.
+
 ### Bulk saves with `batch`
 
 Every save reloads the alive collections of its type. When many saves happen in a row (an import, a bulk edit),
@@ -286,8 +301,8 @@ docker run --rm -v $PWD:/src -w /src swift:6.2 swift test     # Linux, the minim
 v0.1 (wire format), v0.2 (reads), v0.3 (writes), v1.1 (ergonomics: `Fetch`, multi-page `reload()`, ETag / 304,
 `RetryHandler`, batched `resolve`), v1.2 (fixes), v1.3 (`onError`, `lastTransportError`, `batch`, DELETE 404
 as success), v1.4 (cache snapshot), v1.5 (typed throws, Swift 6.2 minimum), v1.6 (LRU eviction), v1.7
-(observable `related`) and v1.8 (`onOutcome`) are implemented and tested against `MockHandler`. Releases are git
-tags; depend on `from: "1.8.0"`. See the milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
+(observable `related`), v1.8 (`onOutcome`) and v1.9 (`Draft.conflicts`, `Draft.rebase`) are implemented and tested
+against `MockHandler`. Releases are git tags; depend on `from: "1.9.0"`. See the milestone list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what comes next.
 
 ## License
 
