@@ -583,10 +583,10 @@ Each band is a milestone in order; the gate on the right is what must be true be
 - [x] Observable through one `TypeRevision` per resource type, bumped when a key is added (response, `upsert`, snapshot restore) or removed (eviction, `clear()`); parent id changes and deletions are observed on the instances.
 - [x] Deleted resources and duplicate ids skipped; never fetches; counts as a use for eviction; `Live` holds its store weakly.
 
-**v1.8 — Outcomes for successes** (what vllage's toasts need, [vllage issue #14](https://github.com/winsmith/vllage/issues/14)) — package side done 2026-10-18
+**v1.8 — Outcomes for successes** (what vllage's toasts need, [vllage issue #14](https://github.com/winsmith/vllage/issues/14)) — package side done 2026-10-18; vllage gate done with vllage PR 32
 
 - [x] `RequestOutcome` and `store.onOutcome`, reported once per request from the same place as `onError` (`record`), successes and accepted statuses included, never `.cancelled`.
-- [ ] vllage shows a toast for loads, saves and failures from `onOutcome` (the gate).
+- [x] vllage shows a toast for loads, saves and failures from `onOutcome` (the gate; vllage PR 32).
 
 **v2 — Depth**: `store.patch(key, …)` for server push / websocket updates; optional `@Resource` macro to generate `resourceType` and `collectionPath`; sparse fieldsets with field-level merge; typed access to resource `links` and `meta`; opt-in client-generated ids for servers that require them.
 
