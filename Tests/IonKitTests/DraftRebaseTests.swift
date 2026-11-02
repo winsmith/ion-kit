@@ -104,6 +104,25 @@ struct DraftRebaseTests {
         #expect(!draft.hasChanges)
     }
 
+    @Test func rebaseOfACleanDraftOntoAnUnchangedLiveHasNoChanges() async throws {
+        // The server's `.005Z` used to drift to `.004Z` and then `.003Z` through the codec, so rebasing a clean draft
+        // onto the very same live value made `hasChanges` true and the app PATCHed `updatedAt` (vllage#60). The
+        // string goes in as the wire form on purpose: `respond(with:)` would encode it once more on the way in.
+        let object = ResourceObject(
+            type: "person", id: "1", attributes: ["name": "Ann", "notes": "n", "updatedAt": "2026-11-02T10:00:00.005Z"]
+        )
+        mock.respond(to: "GET people/1", document: JSONAPIDocument(one: object))
+        let live = try await store.find(Person.self, id: "1")
+        #expect(live.value.updatedAt == ISO8601.parse("2026-11-02T10:00:00.005Z"))
+        var draft = Draft(live)
+        #expect(!draft.hasChanges)
+
+        draft.rebase(onto: live)
+        #expect(!draft.hasChanges)
+        #expect(!draft.isStale(against: live))
+        #expect(draft.value == live.value)
+    }
+
     @Test func aNewDraftHasNoConflictsAndDoesNotRebase() async throws {
         let live = try await loadAnn()
         var draft = Draft(new: Person(id: "", name: "Ben"))
