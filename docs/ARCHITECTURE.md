@@ -148,7 +148,7 @@ The merge-then-decode approach costs one dictionary rebuild per resource and kee
 
 **Identity.** `ResourceKey(type: "person", id: "42")` identifies a resource in the cache. The vllage server assigns ids, so a new resource has none until the server answers: `Draft(new:)` fills `id` with a client-local placeholder (`local:` + UUID) that the codec never sends, and the `Live<T>` for a new resource is created from the response, with the server's id. Nothing is ever rekeyed. A draft whose relationships reference a `local:` id cannot be saved (`IonError.invalidDraft`); save the related resource first.
 
-**Dates.** `Date` attributes are encoded as ISO 8601 UTC with fractional seconds and decoded with a custom strategy that accepts both forms (`Date.ISO8601FormatStyle(includingFractionalSeconds:)`, available in swift-foundation on Linux). `JSONDecoder`'s plain `.iso8601` rejects `2026-10-15T10:00:00.123Z`, which a `timestamptz` round-trip can produce.
+**Dates.** `Date` attributes are encoded as ISO 8601 UTC with fractional seconds, rounded to the millisecond, and decoded with a custom strategy that accepts both forms (`Date.ISO8601FormatStyle(includingFractionalSeconds:)`, available in swift-foundation on Linux). `JSONDecoder`'s plain `.iso8601` rejects `2026-10-15T10:00:00.123Z`, which a `timestamptz` round-trip can produce. `ISO8601.format` is a fixed point: parsing a millisecond string and formatting it gives the same string, so a value that went through the codec encodes exactly as the server sent it (v1.9.1).
 
 ## Requests and the handler chain
 
@@ -492,6 +492,7 @@ Things known to differ on Linux and how the design avoids them: `URLSession` on 
 | The outcomes release is 1.8.0 (2026-10-18) | Additive; `onError` and `lastTransportError` behave as before |
 | Field-level conflicts are new methods, `conflicts(against:)` and `rebase(onto:)`, not a new meaning for `isStale` (2026-10-18, v1.9) | `isStale` is public and documented as "the live instance changed"; redefining it in a minor release would silently change every caller's warning. Both are computed from the codec's diff, so "changed" means exactly what a `PATCH` would send |
 | The draft-rebase release is 1.9.0 (2026-10-18) | Additive |
+| `ISO8601.format` rounds to the millisecond and writes the three digits itself instead of letting `Date.ISO8601FormatStyle` truncate (2026-11-02, v1.9.1, [vllage#60](https://github.com/winsmith/vllage/issues/60)) | The style truncates, and a parsed millisecond sits a hair below itself as a double about half the time, so `.002Z` came back as `.001Z` and a second pass could move it again. `Draft.rebase` runs the live value through the codec while `original` keeps the un-encoded one, so a clean draft reported `hasChanges` and the app PATCHed `updatedAt`. Fixing the format makes every encoded diff stable; rounding the `Date` alone does not, since the rounded value is the same double |
 | Only `links`-based pagination; the server emits `links.next` | Offset/cursor strategies become the server's choice |
 | No third-party dependencies | Linux build and long-term maintenance |
 | SwiftLint runs in CI and locally, pinned to 0.59.1 through its container image; it is a tool, not a package dependency (2026-10-17) | One style check for agents and contributors. Default rules stay on, with trailing commas required in multi-line collection literals (the style the code already used); short names such as `op` are suppressed at their declaration with a reason, not turned off repo-wide |
@@ -1091,6 +1092,18 @@ a batched request format (`batch` coalesces reloads; each save is still its own 
 their own or by size in bytes, an offline write queue, client-generated
 ids, sparse-fieldset merging, relationship endpoints beyond `store.request`, the `@Resource` macro, typed resource
 `links` / `meta`, `If-Match` on writes.
+
+## Implementation notes (2026-11-02, v1.9.1)
+
+- **`ISO8601.format` is a fixed point.** It formats the whole seconds with `Date.ISO8601FormatStyle()` and appends the
+  millisecond digits from the rounded count, so `format(parse(s)) == s` for every millisecond string and
+  `format(parse(format(d))) == format(d)` for every date; the tests check all thousand milliseconds and a sweep of
+  dates. Before, 496 of 1,000 milliseconds moved down one on a round trip and 104 moved again on the next
+  (vllage#60).
+- **`rebase` is unchanged.** Its `original` stays `live.value` rather than the decoded copy, so `isStale` keeps
+  answering `false` right after a rebase even for a live value with sub-millisecond dates; `hasChanges` and
+  `conflicts` compare encoded values, which the fixed point now makes agree. A clean draft rebased onto an unchanged
+  live instance has no changes; there is a test.
 
 ## Implementation notes (2026-10-18, v1.9)
 

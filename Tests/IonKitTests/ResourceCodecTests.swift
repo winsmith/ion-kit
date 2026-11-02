@@ -145,6 +145,23 @@ struct ResourceCodecTests {
         #expect(abs(date.timeIntervalSince1970 - 1_792_058_400) < 1)
     }
 
+    @Test func everyMillisecondSurvivesParseAndFormat() throws {
+        for millisecond in 0..<1000 {
+            let string = "2026-11-02T10:00:00." + String(format: "%03d", millisecond) + "Z"
+            let date = try #require(ISO8601.parse(string))
+            #expect(ISO8601.format(date) == string)
+        }
+    }
+
+    @Test func formatIsAFixedPoint() throws {
+        for step in 0..<1000 {
+            let date = Date(timeIntervalSince1970: 1_793_613_600 + Double(step) * 0.000_999_7)
+            let formatted = ISO8601.format(date)
+            let reparsed = try #require(ISO8601.parse(formatted))
+            #expect(ISO8601.format(reparsed) == formatted)
+        }
+    }
+
     @Test func relationshipAccessors() {
         var one: ToOne<Group> = .unloaded
         #expect(one.id == nil)

@@ -55,7 +55,8 @@ struct Tag: Resource {
 
 Stored properties are the JSON:API attributes, `ToOne` / `ToMany` properties are the relationships, and `id` is
 the resource id. Custom `CodingKeys`, optionals and computed properties all work as usual. Dates travel as ISO 8601
-with or without fractional seconds. Servers that send `snake_case` keys get `ResourceCodec.snakeCase` on the store.
+with or without fractional seconds, encoded to the millisecond. Servers that send `snake_case` keys get
+`ResourceCodec.snakeCase` on the store.
 
 ## Setting up a store
 

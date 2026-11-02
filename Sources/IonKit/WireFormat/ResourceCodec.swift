@@ -274,8 +274,18 @@ public enum ISO8601 {
         return formatter.date(from: string)
     }
 
-    /// Formats as UTC with fractional seconds: `2026-10-15T10:00:00.123Z`.
+    /// Formats as UTC with fractional seconds, rounded to the nearest millisecond: `2026-10-15T10:00:00.123Z`.
+    ///
+    /// `Date.ISO8601FormatStyle(includingFractionalSeconds:)` truncates, and a parsed millisecond lands a hair below
+    /// itself in binary floating point about half the time, so formatting a parsed `.002Z` gave `.001Z`; rounding the
+    /// `Date` first does not help, since the rounded value is the same double. The style formats only the whole
+    /// seconds here and the millisecond digits are appended from the rounded count, so `format(parse(s)) == s` for
+    /// every millisecond string and `format` is a fixed point: `format(parse(format(d))) == format(d)`.
     public static func format(_ date: Date) -> String {
-        date.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        let milliseconds = (date.timeIntervalSinceReferenceDate * 1000).rounded()
+        let seconds = (milliseconds / 1000).rounded(.down)
+        let fraction = String(Int(milliseconds - seconds * 1000))
+        let whole = Date(timeIntervalSinceReferenceDate: seconds).formatted(Date.ISO8601FormatStyle())
+        return whole.dropLast() + "." + String(repeating: "0", count: 3 - fraction.count) + fraction + "Z"
     }
 }
